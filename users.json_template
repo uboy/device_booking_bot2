@@ -1,0 +1,18 @@
+[
+  {
+    "user_id": 123456789,
+    "username": "admin_user",
+    "role": "Admin",
+    "status": "active"
+    "first_name": "Иван",
+    "last_name": "Иванов"
+  },
+  {
+    "user_id": 987654321,
+    "username": "regular_user",
+    "role": "User",
+    "status": "active"
+    "first_name": "Иван",
+    "last_name": "Иванов"
+  }
+]
