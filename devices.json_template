@@ -1,34 +1,169 @@
-{
-  "Tablet": [
+[
     {
-      "id": 1,
-      "name": "iPad Pro",
-      "sn": "SN1234567890",
-      "status": "free"
+        "id": 1,
+        "name": "Device-1",
+        "sn": "SN-482350",
+        "type": "Tablet",
+        "status": "booked",
+        "user_id": 2
     },
     {
-      "id": 2,
-      "name": "Samsung Galaxy Tab",
-      "sn": "SN9876543210",
-      "status": "booked",
-      "user_id": 123456789
-    }
-  ],
-  "Phone": [
+        "id": 2,
+        "name": "Device-2",
+        "sn": "SN-187390",
+        "type": "Tablet",
+        "status": "booked",
+        "user_id": 3
+    },
     {
-      "id": 1,
-      "name": "iPhone 13",
-      "sn": "SN1122334455",
-      "status": "free"
-    }
-  ],
-  "RK Board": [
+        "id": 3,
+        "name": "Device-3",
+        "sn": "SN-795755",
+        "type": "Tablet",
+        "status": "booked",
+        "user_id": 4
+    },
     {
-      "id": 1,
-      "name": "RK3399",
-      "sn": "SN4455667788",
-      "status": "booked",
-      "user_id": 987654321
-    }
-  ]
-}
+        "id": 4,
+        "name": "Device-4",
+        "sn": "SN-298326",
+        "type": "Tablet",
+        "status": "free"
+    },
+    {
+        "id": 5,
+        "name": "Device-5",
+        "sn": "SN-610183",
+        "type": "RKBoard",
+        "status": "booked",
+        "user_id": 3
+    },
+    {
+        "id": 6,
+        "name": "Device-6",
+        "sn": "SN-786690",
+        "type": "PC",
+        "status": "booked",
+        "user_id": 3
+    },
+    {
+        "id": 7,
+        "name": "Device-7",
+        "sn": "SN-499918",
+        "type": "RKBoard",
+        "status": "booked",
+        "user_id": 3
+    },
+    {
+        "id": 8,
+        "name": "Device-8",
+        "sn": "SN-225319",
+        "type": "PC",
+        "status": "free"
+    },
+    {
+        "id": 9,
+        "name": "Device-9",
+        "sn": "SN-627247",
+        "type": "Tablet",
+        "status": "free"
+    },
+    {
+        "id": 10,
+        "name": "Device-10",
+        "sn": "SN-866519",
+        "type": "Phone",
+        "status": "free"
+    },
+    {
+        "id": 11,
+        "name": "Device-11",
+        "sn": "SN-920299",
+        "type": "Phone",
+        "status": "free"
+    },
+    {
+        "id": 12,
+        "name": "Device-12",
+        "sn": "SN-840637",
+        "type": "PC",
+        "status": "booked",
+        "user_id": 5
+    },
+    {
+        "id": 13,
+        "name": "Device-13",
+        "sn": "SN-122008",
+        "type": "Tablet",
+        "status": "free"
+    },
+    {
+        "id": 14,
+        "name": "Device-14",
+        "sn": "SN-863716",
+        "type": "Tablet",
+        "status": "booked",
+        "user_id": 3
+    },
+    {
+        "id": 15,
+        "name": "Device-15",
+        "sn": "SN-227190",
+        "type": "PC",
+        "status": "booked",
+        "user_id": 8
+    },
+    {
+        "id": 16,
+        "name": "Device-16",
+        "sn": "SN-119680",
+        "type": "Tablet",
+        "status": "booked",
+        "user_id": 8
+    },
+    {
+        "id": 17,
+        "name": "Device-17",
+        "sn": "SN-297821",
+        "type": "Phone",
+        "status": "booked",
+        "user_id": 4
+    },
+    {
+        "id": 18,
+        "name": "Device-18",
+        "sn": "SN-802085",
+        "type": "RKBoard",
+        "status": "booked",
+        "user_id": 9
+    },
+    {
+        "id": 19,
+        "name": "Device-19",
+        "sn": "SN-114086",
+        "type": "PC",
+        "status": "free"
+    },
+    {
+        "id": 20,
+        "name": "Device-20",
+        "sn": "SN-512056",
+        "type": "PC",
+        "status": "free"
+    },
+     {
+    "id": 21,
+    "name": "iPhone 12",
+    "sn": "SN123456",
+    "type": "Phone",
+    "status": "free"
+  },
+  {
+    "id": 22,
+    "name": "Samsung Galaxy Tab",
+    "sn": "SN789012",
+    "type": "Tablet",
+    "status": "booked",
+    "user_id": 12345
+  }
+]

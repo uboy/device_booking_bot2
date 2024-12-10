@@ -47,12 +47,8 @@ def get_user_full_name(user_id):
 
 # Получение устройств пользователя
 def get_user_devices(user_id):
-    booked_devices = []
-    for device_type, items in devices.items():
-        for device in items:
-            if device.get("user_id") == user_id:
-                booked_devices.append(device)
-    return booked_devices
+    return [device for device in devices if device.get("user_id") == user_id]
+
 
 
 # Управление пользователями
@@ -380,16 +376,13 @@ async def list_devices(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     all_devices = []
-    for device_type, items in devices.items():
-        all_devices.append(f"Тип: {device_type}")
-        for item in items:
-            status = "Свободно" if item["status"] == "free" else "Забронировано"
-            booked_by = f" (Забронировано: {get_user_full_name(item['user_id'])})" if item["status"] == "booked" else ""
-            all_devices.append(f"- {item['name']} (SN: {item['sn']}, {status}){booked_by}")
+    for device in devices:
+        status = "Свободно" if device["status"] == "free" else "Забронировано"
+        booked_by = f" (Забронировано: {get_user_full_name(device['user_id'])})" if device["status"] == "booked" else ""
+        all_devices.append(f"- {device['name']} (SN: {device['sn']}, Тип: {device['type']}, {status}){booked_by}")
 
     keyboard = [
-        [InlineKeyboardButton("Главное меню", callback_data="main_menu")],
-        [InlineKeyboardButton("Назад", callback_data="admin_panel" if is_admin(query.from_user.id) else "return_to_main_menu")]
+        [InlineKeyboardButton("Главное меню", callback_data="main_menu")]
     ]
 
     if not all_devices:
@@ -398,19 +391,25 @@ async def list_devices(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("\n".join(all_devices), reply_markup=InlineKeyboardMarkup(keyboard))
 
 
+
 # Бронирование устройства
 async def book_device(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
+    device_types = list(set(device["type"] for device in devices if device["status"] == "free"))
+
     keyboard = [
         [InlineKeyboardButton(device_type, callback_data=f"select_device_type_{device_type}")]
-        for device_type in devices.keys()
+        for device_type in device_types
     ]
+    keyboard.append([InlineKeyboardButton("Главное меню", callback_data="main_menu")])
+
     await query.message.reply_text(
         "Выберите тип устройства для бронирования:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
 
 
 # Выбор устройства для бронирования
@@ -419,44 +418,69 @@ async def select_device(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     device_type = query.data.split("_")[-1]
 
-    available_devices = [d for d in devices[device_type] if d["status"] == "free"]
+    available_devices = [d for d in devices if d["type"] == device_type and d["status"] == "free"]
 
     if not available_devices:
-        keyboard = [
-            [InlineKeyboardButton("Главное меню", callback_data="main_menu")],
-            [InlineKeyboardButton("Назад", callback_data="select_device")]
-        ]
-        await query.message.reply_text(f"Нет доступных устройств типа {device_type}.",reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.message.reply_text(
+            f"Нет доступных устройств типа {device_type}.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("Главное меню", callback_data="main_menu")],
+                [InlineKeyboardButton("Назад", callback_data="book_device")]
+            ])
+        )
         return
 
+    # Генерация кнопок для устройств
     keyboard = [
-        [InlineKeyboardButton(f"{d['name']} (SN: {d['sn']})", callback_data=f"book_{device_type}_{d['id']}")]
+        [InlineKeyboardButton(f"{d['name']} (SN: {d['sn']})", callback_data=f"book_device_{d['id']}")]
         for d in available_devices
     ]
+    keyboard.append([InlineKeyboardButton("Главное меню", callback_data="main_menu")])
+
     await query.message.reply_text(
         "Выберите устройство для бронирования:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
+
 # Подтверждение бронирования устройства
 async def book_specific_device(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    _, device_type, device_id = query.data.split("_")
-    device_id = int(device_id)
 
-    for device in devices[device_type]:
-        if device["id"] == device_id and device["status"] == "free":
-            device["status"] = "booked"
-            device["user_id"] = query.from_user.id
-            save_data("devices.json", devices)
-            log_action("BOOKED", query.from_user.id, device["name"], device["sn"])
-            await query.message.reply_text(f"Устройство {device['name']} {device["sn"]} успешно забронировано.")
-            await return_to_main_menu(update, context)
-            return
+    # Извлечение ID устройства
+    match = re.match(r"book_device_(\d+)", query.data)
+    if not match:
+        await query.message.reply_text("Ошибка: некорректные данные.")
+        return
 
-    await query.message.reply_text("Ошибка при бронировании устройства.")
+    device_id = int(match.group(1))
+    user_id = query.from_user.id
+
+    # Поиск устройства
+    device = next((d for d in devices if d["id"] == device_id and d["status"] == "free"), None)
+    if not device:
+        await query.message.reply_text("Ошибка: устройство не найдено или уже забронировано.")
+        return
+
+    # Обновление статуса устройства
+    device["status"] = "booked"
+    device["user_id"] = user_id
+    save_data("devices.json", devices)
+
+    # Логирование
+    log_action("BOOKED", user_id, device["name"], device["sn"])
+
+    # Сообщение об успешном бронировании
+    await query.message.reply_text(
+        f"Устройство {device['name']} (SN: {device['sn']}) успешно забронировано.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Главное меню", callback_data="main_menu")],
+            [InlineKeyboardButton("Назад", callback_data="book_device")]
+        ])
+    )
+
 
 
 async def my_devices(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -464,19 +488,18 @@ async def my_devices(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     user_id = query.from_user.id
 
-    booked_devices = get_user_devices(user_id)
+    # Список устройств, забронированных текущим пользователем
+    booked_devices = [device for device in devices if device.get("user_id") == user_id]
+
     if not booked_devices:
         await query.message.reply_text("У вас нет забронированных устройств.")
         return
 
-    # Кнопки для освобождения каждого устройства
+    # Генерация кнопок для освобождения устройств
     keyboard = [
-        [InlineKeyboardButton(f"Освободить {d['name']} (SN: {d['sn']})",
-                              callback_data=f"release_device_{device_type}_{d['id']}")]
-        for device_type, items in devices.items()
-        for d in items if d.get("user_id") == user_id
+        [InlineKeyboardButton(f"Освободить {d['name']} (SN: {d['sn']})", callback_data=f"release_device_{d['id']}")]
+        for d in booked_devices
     ]
-    # Кнопка для освобождения всех устройств
     keyboard.append([InlineKeyboardButton("Освободить все устройства", callback_data="release_all_user_devices")])
     keyboard.append([InlineKeyboardButton("Главное меню", callback_data="main_menu")])
 
@@ -493,75 +516,51 @@ async def release_all_user_devices(update: Update, context: ContextTypes.DEFAULT
     await query.answer()
     user_id = query.from_user.id
 
+    # Флаг для проверки, освобождены ли устройства
     released_any = False
 
-    for device_type, items in devices.items():
-        for device in items:
-            if device.get("user_id") == user_id:
-                log_action("RELEASED", user_id, device["name"], device["sn"])
-                device["status"] = "free"
-                device.pop("user_id", None)
-                released_any = True
+    for device in devices:
+        if device.get("user_id") == user_id:
+            log_action("USER RELEASED", user_id, device["name"], device["sn"])
+            device["status"] = "free"
+            device.pop("user_id", None)
+            released_any = True
 
     if released_any:
         save_data("devices.json", devices)
         await query.message.reply_text("Все ваши устройства успешно освобождены.")
     else:
         await query.message.reply_text("У вас нет забронированных устройств.")
-        return  # Завершаем выполнение, чтобы избежать вызова my_devices
-
-    # Проверяем, остались ли устройства перед вызовом my_devices
-    if get_user_devices(user_id):
-        await my_devices(update, context)
 
 
 async def release_device(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    # Используем регулярное выражение для извлечения device_type и device_id
-    match = re.match(r"release_device_(\w+)_(\d+)", query.data)
+    match = re.match(r"release_device_(\d+)", query.data)
     if not match:
         await query.message.reply_text("Ошибка: некорректные данные.")
         return
 
-    device_type, device_id = match.groups()
-    device_id = int(device_id)
-
+    device_id = int(match.group(1))
     user_id = query.from_user.id
 
-    # Проверяем устройства конкретного типа
-    for device in devices.get(device_type, []):
-        if device["id"] == device_id:
-            # Если пользователь — User, проверяем, является ли он владельцем устройства
-            if not is_admin(user_id) and device.get("user_id") != user_id:
-                await query.message.reply_text("Ошибка: вы не можете освободить это устройство.")
-                return
+    device = next((d for d in devices if d["id"] == device_id), None)
+    if not device:
+        await query.message.reply_text("Устройство не найдено.")
+        return
 
-            # Логирование действия
-            action = "ADMIN RELEASED" if is_admin(user_id) else "USER RELEASED"
-            log_action(action, user_id, device["name"], device["sn"])
+    if device.get("user_id") != user_id and not is_admin(user_id):
+        await query.message.reply_text("Вы не можете освободить это устройство.")
+        return
 
-            # Освобождаем устройство
-            device["status"] = "free"
-            device.pop("user_id", None)
-            save_data("devices.json", devices)
+    log_action("RELEASED", user_id, device["name"], device["sn"])
+    device["status"] = "free"
+    device.pop("user_id", None)
+    save_data("devices.json", devices)
 
-            keyboard = [
-                [InlineKeyboardButton("Главное меню", callback_data="main_menu")],
-                [InlineKeyboardButton("Назад", callback_data="my_devices")]
-            ]
-
-            await query.message.reply_text(
-                f"Устройство {device['name']} (SN: {device['sn']}) успешно освобождено.",
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-            return
-
-    await query.message.reply_text("Ошибка: устройство не найдено.")
-
-
-
+    await query.message.reply_text(f"Устройство {device['name']} (SN: {device['sn']}) успешно освобождено.")
+    await return_to_main_menu(update, context)
 
 # Панель администрирования
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -583,36 +582,39 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def all_booked_devices(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    user_id = query.from_user.id
 
+    user_id = query.from_user.id
     if not is_admin(user_id):
         await query.message.reply_text("У вас нет доступа к этой функции.")
         return
 
-    booked_devices = []
-    for device_type, items in devices.items():
-        for device in items:
-            if device["status"] == "booked":
-                user_name = get_user_full_name(device["user_id"])
-                booked_devices.append({
-                    "device": device,
-                    "user_name": user_name
-                })
+    # Собираем информацию о забронированных устройствах
+    booked_devices = [
+        {
+            "device": device,
+            "user_name": get_user_full_name(device["user_id"])
+        }
+        for device in devices if device["status"] == "booked"
+    ]
 
     if not booked_devices:
         await query.message.reply_text("Нет забронированных устройств.")
         return
 
-    # Кнопки для освобождения каждого устройства
+    # Генерация кнопок для освобождения
     keyboard = [
-        [InlineKeyboardButton(f"Освободить {d['device']['name']} (SN: {d['device']['sn']}) - {d['user_name']}",
-                              callback_data=f"admin_release_device_{d['device']['id']}_{d['device']['sn']}")]
+        [
+            InlineKeyboardButton(
+                f"Освободить {d['device']['name']} (SN: {d['device']['sn']}) - {d['user_name']}",
+                callback_data=f"admin_release_device_{d['device']['id']}"
+            )
+        ]
         for d in booked_devices
     ]
-    # Кнопка для освобождения всех устройств
     keyboard.append([InlineKeyboardButton("Освободить все устройства", callback_data="admin_release_all_devices")])
     keyboard.append([InlineKeyboardButton("Назад", callback_data="admin_panel")])
 
+    # Формирование списка устройств
     device_list = "\n".join([
         f"{d['device']['name']} (SN: {d['device']['sn']}) - {d['user_name']}"
         for d in booked_devices
@@ -637,7 +639,7 @@ async def admin_release_device(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.message.reply_text("У вас нет доступа к этой функции.")
         return
 
-    for device_type, items in devices.items():
+    for device_type, items in devices:
         for device in items:
             if device["id"] == device_id and device["sn"] == device_sn and device["status"] == "booked":
                 log_action("ADMIN RELEASED", device["user_id"], device["name"], device["sn"])
@@ -649,6 +651,7 @@ async def admin_release_device(update: Update, context: ContextTypes.DEFAULT_TYP
                 return
 
     await query.message.reply_text("Ошибка: устройство не найдено или уже освобождено.")
+    await return_to_main_menu(update, context)
 
 
 async def admin_release_all_devices(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -660,23 +663,22 @@ async def admin_release_all_devices(update: Update, context: ContextTypes.DEFAUL
         await query.message.reply_text("У вас нет доступа к этой функции.")
         return
 
+    # Флаг для проверки, были ли устройства освобождены
     released_any = False
 
-    for device_type, items in devices.items():
-        for device in items:
-            if device["status"] == "booked":
-                log_action("ADMIN RELEASED", device["user_id"], device["name"], device["sn"])
-                device["status"] = "free"
-                device.pop("user_id", None)
-                released_any = True
+    for device in devices:
+        if device["status"] == "booked":
+            log_action("ADMIN RELEASED", device["user_id"], device["name"], device["sn"])
+            device["status"] = "free"
+            device.pop("user_id", None)
+            released_any = True
 
     if released_any:
         save_data("devices.json", devices)
-        await query.message.reply_text("Все устройства успешно освобождены.")
+        await query.message.reply_text("Все забронированные устройства успешно освобождены.")
     else:
         await query.message.reply_text("Нет забронированных устройств.")
-
-    await all_booked_devices(update, context)
+    await return_to_main_menu(update, context)
 
 
 # Освобождение всех устройств (для администраторов)
@@ -688,7 +690,7 @@ async def release_all_devices(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.message.reply_text("У вас нет доступа к этой функции.")
         return
 
-    for device_type, items in devices.items():
+    for device_type, items in devices:
         for device in items:
             if device["status"] == "booked":
                 log_action("RELEASED", device["user_id"], device["name"], device["sn"])
@@ -710,7 +712,7 @@ async def manage_devices(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton(f"{device['name']} (SN: {device['sn']})", callback_data=f"edit_device_{device_type}_{device['id']}"),
             InlineKeyboardButton("История", callback_data=f"history_{device['sn']}")
         ]
-        for device_type, items in devices.items()
+        for device_type, items in devices
         for device in items
     ]
     keyboard.append([InlineKeyboardButton("Добавить устройство", callback_data="add_device")])
@@ -856,13 +858,13 @@ def main():
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, unknown_message))
     app.add_handler(CallbackQueryHandler(list_devices, pattern="list_devices"))
-    app.add_handler(CallbackQueryHandler(book_device, pattern="book_device"))
+    app.add_handler(CallbackQueryHandler(book_specific_device, pattern="book_device_.*"))
     app.add_handler(CallbackQueryHandler(select_device, pattern="select_device_type_.*"))
-    app.add_handler(CallbackQueryHandler(book_specific_device, pattern="book_.*"))
+    app.add_handler(CallbackQueryHandler(book_device, pattern="book_device"))
+    app.add_handler(CallbackQueryHandler(release_device, pattern=r"release_device_\d+"))
     app.add_handler(CallbackQueryHandler(my_devices, pattern="my_devices"))
     app.add_handler(CallbackQueryHandler(all_booked_devices, pattern="all_booked_devices"))
     app.add_handler(CallbackQueryHandler(release_all_devices, pattern="release_all_devices"))
-    app.add_handler(CallbackQueryHandler(release_device, pattern=r"release_device_\w+_\d+"))
     app.add_handler(CallbackQueryHandler(release_all_user_devices, pattern="release_all_user_devices"))
     app.add_handler(CallbackQueryHandler(admin_release_all_devices, pattern="admin_release_all_devices"))
 
