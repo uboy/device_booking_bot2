@@ -1,145 +1,969 @@
-from prettytable import PrettyTable  # Убедитесь, что библиотека установлена: pip install prettytable
+from __futuretable import PrettyTable  # pip install prettytable
 from datetime import datetime, timedelta
 import re
 import csv
 import json
 import os
-from typing import Any
+from typing import Any, Optional, List, Dict
 import io
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
-# Флаг для включения регистрации
-registration_enabled = False
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+)
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
-# Загрузка данных с обработкой ошибок
-def load_data(filename):
+# ==============================
+#   Глобальные данные
+# ==============================
+
+CONFIG_FILE = "config.json"
+DEVICES_FILE = "devices.json"
+USERS_FILE = "users.json"
+LOGS_FILE = "device_logs.json"
+
+config: Dict[str, Any] = {}
+devices: List[Dict[str, Any]] = []
+users: List[Dict[str, Any]] = []
+logs: Dict[str, List[Dict[str, Any]]] = {}
+
+# Флаг регистрации (загружается/сохраняется через config.json)
+registration_enabled: bool = False
+
+
+# ==============================
+#   Работа с файлами
+# ==============================
+
+def load_json(filename: str, default: Any) -> Any:
     if not os.path.exists(filename):
-        return {} if filename == "devices.json" else []
+        return default
     with open(filename, "r", encoding="utf-8") as f:
         return json.load(f)
 
-def save_data(filename: str, data: Any) -> None:
-    with open(filename, "w", encoding="utf-8") as f:  # Явно указано, что это объект записи строк
-        if isinstance(f, io.TextIOWrapper):          # Убедитесь, что файл открыт в режиме записи текста
-            json.dump(data, f, indent=4, ensure_ascii=False)
 
-# Загрузка конфигурации
-config = load_data("config.json")
-devices = load_data("devices.json")
-users = load_data("users.json")
+def save_json(filename: str, data: Any) -> None:
+    with open(filename, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
 
 
-def access_control(required_status="active", required_role=None):
+def load_all_data() -> None:
+    global config, devices, users, logs, registration_enabled
+
+    config = load_json(CONFIG_FILE, {})
+    # дефолты для конфига
+    config.setdefault("bot_token", "YOUR_TELEGRAM_BOT_TOKEN_HERE")
+    config.setdefault("admin_ids", [])
+    config.setdefault("device_types", ["Tablet", "Phone", "PC", "RKBoard"])
+    config.setdefault("registration_enabled", False)
+
+    registration_enabled = bool(config.get("registration_enabled", False))
+
+    # устройства — список словарей (как в devices.json_template)
+    devices_list = load_json(DEVICES_FILE, [])
+    # гарантируем, что это список
+    devices[:] = devices_list if isinstance(devices_list, list) else []
+
+    # пользователи — список словарей
+    users_list = load_json(USERS_FILE, [])
+    users[:] = users_list if isinstance(users_list, list) else []
+
+    logs_dict = load_json(LOGS_FILE, {})
+    logs.clear()
+    logs.update(logs_dict if isinstance(logs_dict, dict) else {})
+
+
+def save_config() -> None:
+    config["registration_enabled"] = registration_enabled
+    save_json(CONFIG_FILE, config)
+
+
+def save_devices() -> None:
+    save_json(DEVICES_FILE, devices)
+
+
+def save_users() -> None:
+    save_json(USERS_FILE, users)
+
+
+def save_logs() -> None:
+    save_json(LOGS_FILE, logs)
+
+
+# ==============================
+#   Утилиты
+# ==============================
+
+def format_datetime(iso_datetime: Optional[str]) -> str:
+    if not iso_datetime:
+        return "Не указано"
+    try:
+        dt = datetime.fromisoformat(iso_datetime)
+    except ValueError:
+        return iso_datetime
+    return dt.strftime("%d.%m.%Y %H:%M")
+
+
+def log_action(device_sn: str, action: str) -> None:
+    if device_sn not in logs:
+        logs[device_sn] = []
+    logs[device_sn].append(
+        {"timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "action": action}
+    )
+    save_logs()
+
+
+def get_user_by_id(user_id: int) -> Optional[Dict[str, Any]]:
+    return next((u for u in users if u.get("user_id") == user_id), None)
+
+
+def get_user_role(user_id: int) -> Optional[str]:
+    user = get_user_by_id(user_id)
+    if user and user.get("status") == "active":
+        return user.get("role")
+    return None
+
+
+def get_user_full_name(user_id: int) -> str:
+    user = get_user_by_id(user_id)
+    if not user:
+        return "Неизвестно"
+    return f"{user.get('first_name', 'Неизвестно')} {user.get('last_name', 'Неизвестно')}".strip()
+
+
+def is_admin(user_id: int) -> bool:
+    # Админ, если:
+    # - в users с ролью Admin и статусом active, или
+    # - в списке admin_ids из config
+    return (
+        get_user_role(user_id) == "Admin"
+        or user_id in config.get("admin_ids", [])
+    )
+
+
+def get_main_menu_keyboard(user_id: int) -> ReplyKeyboardMarkup:
+    keyboard = [["Список устройств", "Бронирование"], ["Мои устройства"]]
+    if is_admin(user_id):
+        keyboard.append(["Администрирование"])
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+
+def get_user_devices_list(user_id: int) -> List[Dict[str, Any]]:
+    return [d for d in devices if d.get("user_id") == user_id]
+
+
+def cleanup_expired_bookings() -> None:
+    """Автоматически освобождает устройства с истёкшим сроком брони."""
+    now = datetime.now()
+    changed = False
+    for d in devices:
+        exp = d.get("booking_expiration")
+        if not exp:
+            continue
+        try:
+            dt = datetime.fromisoformat(exp)
+        except ValueError:
+            continue
+        if dt < now and d.get("status") == "booked":
+            d["status"] = "free"
+            d.pop("user_id", None)
+            d.pop("booking_expiration", None)
+            log_action(d["sn"], "Бронирование автоматически завершено (истёк срок)")
+            changed = True
+    if changed:
+        save_devices()
+
+
+# ==============================
+#   Декоратор доступа
+# ==============================
+
+def access_control(required_status: str = "active", required_role: Optional[str] = None):
+    """
+    Проверяет:
+      - зарегистрирован ли пользователь,
+      - имеет ли нужный статус,
+      - имеет ли нужную роль (если указано).
+    Работает и для сообщений, и для callback_query.
+    """
+
     def decorator(func):
         async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
-            user_id = update.effective_user.id
-            user = next((u for u in users if u["user_id"] == user_id), None)
+            user = update.effective_user
+            user_id = user.id if user else None
 
-            if not user:
-                await update.message.reply_text(
+            is_callback = update.callback_query is not None
+            msg_obj = update.callback_query.message if is_callback else update.message
+
+            if user_id is None or msg_obj is None:
+                return
+
+            db_user = get_user_by_id(user_id)
+
+            if not db_user:
+                await msg_obj.reply_text(
                     "Вы не зарегистрированы. Используйте /register для отправки заявки.",
-                    reply_markup=ReplyKeyboardMarkup([["/help"]], resize_keyboard=True)
+                    reply_markup=ReplyKeyboardMarkup([["/help"]], resize_keyboard=True),
                 )
                 return
 
-            if user["status"] != required_status:
-                await update.message.reply_text(
-                    f"Ваш статус: {user['status']}. Доступ разрешён только для пользователей со статусом: {required_status}.",
-                    reply_markup=ReplyKeyboardMarkup([["/help"]], resize_keyboard=True)
+            if db_user.get("status") != required_status:
+                await msg_obj.reply_text(
+                    f"Ваш статус: {db_user.get('status')}. "
+                    f"Доступ разрешён только для пользователей со статусом: {required_status}.",
+                    reply_markup=ReplyKeyboardMarkup([["/help"]], resize_keyboard=True),
                 )
                 return
 
-            if required_role and user["role"] != required_role:
-                await update.message.reply_text(
+            if required_role and db_user.get("role") != required_role and not (
+                required_role == "Admin" and is_admin(user_id)
+            ):
+                await msg_obj.reply_text(
                     f"Доступ к этой функции разрешён только для пользователей с ролью: {required_role}.",
-                    reply_markup=ReplyKeyboardMarkup([["/help"]], resize_keyboard=True)
+                    reply_markup=ReplyKeyboardMarkup([["/help"]], resize_keyboard=True),
                 )
                 return
 
             return await func(update, context, *args, **kwargs)
+
         return wrapper
+
     return decorator
 
 
-# Получение роли пользователя
-def get_user_role(user_id):
-    for user in users:
-        if user["user_id"] == user_id and user["status"] == "active":
-            return user["role"]
-    return None
+# ==============================
+#   Команды / help / меню
+# ==============================
 
-
-# Получение имени пользователя
-def get_user_full_name(user_id):
-    for user in users:
-        if user["user_id"] == user_id:
-            return f"{user.get('first_name', 'Неизвестно')} {user.get('last_name', 'Неизвестно')}"
-    return "Неизвестно"
-
-
-# Получение устройств пользователя
-def get_user_devices(user_id):
-    return [device for device in devices if device.get("user_id") == user_id]
-
-
-
-# Управление пользователями
-@access_control(required_role="Admin")
-async def manage_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-
-    if not is_admin(user_id):
-        await update.message.reply_text(
-            "У вас нет доступа к управлению пользователями.",
-            reply_markup=ReplyKeyboardMarkup([["Главное меню"]], resize_keyboard=True)
-        )
-        return
-
-    pending_users = [user for user in users if user["status"] == "pending"]
-
-    keyboard = [
-        [
-            f"Утвердить {user['user_id']}",
-            f"Удалить {user['user_id']}"
-        ]
-        for user in pending_users
-    ]
-
-    # Добавляем опции управления регистрацией
-    registration_status = "Выключить регистрацию" if registration_enabled else "Включить регистрацию"
-    keyboard.append([registration_status])
-    keyboard.append(["Список всех пользователей", "Назад"])
-
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Управление пользователями:",
-        reply_markup=reply_markup
+        "Команды:\n"
+        "/start - Главное меню\n"
+        "/help - Справка\n"
+        "/register - Отправить заявку на регистрацию\n"
+        "\nДоступные функции зависят от вашей роли."
     )
 
 
-# Просмотр всех пользователей с кнопками и ролями
-@access_control(required_role="Admin")
-async def view_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+@access_control()
+async def return_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    await update.message.reply_text(
+        "Главное меню:", reply_markup=get_main_menu_keyboard(user_id)
+    )
 
-    if not is_admin(user_id):
+
+@access_control()
+async def go_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Просто возвращаем главное меню
+    user_id = update.effective_user.id
+    await update.message.reply_text(
+        "Главное меню:", reply_markup=get_main_menu_keyboard(user_id)
+    )
+
+
+# ==============================
+#   Регистрация
+# ==============================
+
+async def register_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global registration_enabled
+
+    if not registration_enabled:
+        await update.message.reply_text("Регистрация временно отключена.")
+        return
+
+    tg_user = update.effective_user
+    user_id = tg_user.id
+
+    for u in users:
+        if u.get("user_id") == user_id:
+            await update.message.reply_text(
+                "Вы уже зарегистрированы или ваша заявка ожидает рассмотрения."
+            )
+            return
+
+    new_user = {
+        "user_id": user_id,
+        "username": tg_user.username or "Не указано",
+        "first_name": tg_user.first_name or "Не указано",
+        "last_name": tg_user.last_name or "Не указано",
+        "role": "User",
+        "status": "pending",
+    }
+    users.append(new_user)
+    save_users()
+
+    await update.message.reply_text(
+        "Ваша заявка на регистрацию отправлена. Ожидайте подтверждения администратора."
+    )
+
+
+@access_control(required_role="Admin")
+async def toggle_registration(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global registration_enabled
+    registration_enabled = not registration_enabled
+    save_config()
+    status = "включена" if registration_enabled else "выключена"
+    await update.message.reply_text(f"Регистрация {status}.")
+
+
+# ==============================
+#   Устройства — список / просмотр
+# ==============================
+
+@access_control()
+async def list_devices(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cleanup_expired_bookings()
+
+    if not devices:
+        await update.message.reply_text("Нет устройств для отображения.")
+        return
+
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for d in devices:
+        grouped.setdefault(d.get("type", "Не указан"), []).append(d)
+
+    response = "Список устройств:\n"
+    for dev_type, group in sorted(grouped.items()):
+        table = PrettyTable()
+        table.field_names = [
+            "Название",
+            "SN",
+            "Статус",
+            "Дата окончания брони",
+            "Пользователь",
+        ]
+        for d in group:
+            status = "Свободно" if d.get("status") == "free" else "Забронировано"
+            user_name = (
+                get_user_full_name(d.get("user_id"))
+                if d.get("status") == "booked"
+                else "-"
+            )
+            booking_exp = format_datetime(d.get("booking_expiration"))
+            table.add_row([d.get("name"), d.get("sn"), status, booking_exp, user_name])
+
+        response += f"\n{dev_type}:\n```\n{table}\n```\n"
+
+    await update.message.reply_text(response, parse_mode="Markdown")
+
+
+# ==============================
+#   Бронирование устройств
+# ==============================
+
+@access_control()
+async def book_device(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cleanup_expired_bookings()
+    # доступные типы только среди свободных устройств
+    available_types = sorted(
+        {d["type"] for d in devices if d.get("status") == "free"}
+    )
+
+    if not available_types:
+        await update.message.reply_text("Нет доступных устройств для бронирования.")
+        return
+
+    keyboard = [[t] for t in available_types]
+    keyboard.append(["Назад"])
+    await update.message.reply_text(
+        "Выберите тип устройства для бронирования:",
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
+    )
+
+
+@access_control()
+async def select_device(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cleanup_expired_bookings()
+    device_type = update.message.text.strip()
+    # фильтруем свободные устройства этого типа
+    available = [
+        d for d in devices if d.get("type") == device_type and d.get("status") == "free"
+    ]
+
+    if not available:
         await update.message.reply_text(
-            "У вас нет доступа к списку пользователей.",
-            reply_markup=ReplyKeyboardMarkup([["Главное меню"]], resize_keyboard=True)
+            f"Нет доступных устройств типа {device_type}.",
+            reply_markup=ReplyKeyboardMarkup([["Назад"]], resize_keyboard=True),
         )
         return
 
     keyboard = [
-        [InlineKeyboardButton(f"{user['first_name']} {user['last_name']} {user['user_id']} ({user['status']})", callback_data=f"user_{user['user_id']}")]
-        for user in users
+        [f"{d['name']} ({d['type']}) - ID {d['id']}"] for d in available
     ]
-    keyboard.append([InlineKeyboardButton("Назад", callback_data="admin_panel")])
+    keyboard.append(["Назад"])
+    await update.message.reply_text(
+        "Выберите устройство для бронирования:",
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
+    )
+
+
+@access_control()
+async def book_specific_device(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cleanup_expired_bookings()
+    device_text = update.message.text.strip()
+
+    try:
+        device_id = int(device_text.split(" - ID ")[-1])
+    except (ValueError, IndexError):
+        await update.message.reply_text(
+            "Ошибка: некорректный формат данных устройства.",
+            reply_markup=ReplyKeyboardMarkup([["Назад"]], resize_keyboard=True),
+        )
+        return
+
+    device = next(
+        (d for d in devices if d.get("id") == device_id and d.get("status") == "free"),
+        None,
+    )
+    if not device:
+        await update.message.reply_text(
+            "Ошибка: устройство не найдено или уже забронировано.",
+            reply_markup=ReplyKeyboardMarkup([["Назад"]], resize_keyboard=True),
+        )
+        return
+
+    # Новая функциональность: период брони по умолчанию + можно задать в конфиге
+    default_period = device.get(
+        "default_booking_period", config.get("default_booking_period_days", 1)
+    )
+    expiration_date = datetime.now() + timedelta(days=default_period)
+
+    device["status"] = "booked"
+    device["user_id"] = update.effective_user.id
+    device["booking_expiration"] = expiration_date.isoformat()
+    save_devices()
 
     await update.message.reply_text(
-        "Список пользователей:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        f"Устройство {device['name']} (SN: {device['sn']}) "
+        f"забронировано до {expiration_date.strftime('%Y-%m-%d %H:%M:%S')}."
+    )
+
+    log_action(
+        device["sn"],
+        f"Устройство забронировано пользователем "
+        f"{get_user_full_name(update.effective_user.id)} "
+        f"до {expiration_date.strftime('%Y-%m-%d %H:%M:%S')}.",
+    )
+
+
+# ==============================
+#   Мои устройства / освобождение
+# ==============================
+
+@access_control()
+async def my_devices(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cleanup_expired_bookings()
+    user_id = update.effective_user.id
+    user_devs = get_user_devices_list(user_id)
+
+    if not user_devs:
+        await update.message.reply_text("У вас нет забронированных устройств.")
+        return
+
+    table = PrettyTable()
+    table.field_names = ["Название", "SN", "Дата окончания брони"]
+    for d in user_devs:
+        table.add_row(
+            [d["name"], d["sn"], format_datetime(d.get("booking_expiration"))]
+        )
+
+    keyboard = [
+        [f"Освободить {d['name']} (SN: {d['sn']})"] for d in user_devs
+    ]
+    keyboard.append(["Освободить все устройства"])
+    keyboard.append(["Назад"])
+
+    await update.message.reply_text(
+        f"Ваши забронированные устройства:\n```\n{table}\n```",
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
+    )
+
+
+@access_control()
+async def release_devices(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cleanup_expired_bookings()
+    user_id = update.effective_user.id
+    user_role = get_user_role(user_id)
+
+    is_callback = update.callback_query is not None
+    src = update.callback_query if is_callback else update.message
+    text = src.data if is_callback else src.text.strip()
+
+    menu_context = context.user_data.get("menu_context", "user_devices")
+    if is_callback and context.user_data.get("menu_context") != "admin_panel":
+        menu_context = "admin_panel" if user_role == "Admin" else "user_devices"
+
+    release_all = text in ("release_all_devices", "Освободить все устройства")
+
+    if release_all:
+        candidates = [
+            d
+            for d in devices
+            if d.get("status") == "booked"
+            and (
+                (menu_context == "user_devices" and d.get("user_id") == user_id)
+                or (menu_context == "admin_panel" and user_role == "Admin")
+            )
+        ]
+    else:
+        if is_callback:
+            # callback_data вида "release_<id>"
+            try:
+                device_id = int(text.split("_", 1)[1])
+            except (ValueError, IndexError):
+                await src.edit_message_text("Ошибка: некорректный идентификатор устройства.")
+                return
+            candidates = [
+                d
+                for d in devices
+                if d.get("id") == device_id
+                and d.get("status") == "booked"
+                and (
+                    (menu_context == "user_devices" and d.get("user_id") == user_id)
+                    or (menu_context == "admin_panel" and user_role == "Admin")
+                )
+            ]
+        else:
+            # текст: "Освободить NAME (SN: SN123)"
+            match = re.match(r"Освободить (.+?) \(SN: (.+?)\)", text)
+            if not match:
+                await src.reply_text(
+                    "Ошибка: некорректный формат команды.",
+                    reply_markup=ReplyKeyboardMarkup([["Назад"]], resize_keyboard=True),
+                )
+                return
+            name, sn = match.groups()
+            candidates = [
+                d
+                for d in devices
+                if d.get("name") == name
+                and d.get("sn") == sn
+                and d.get("status") == "booked"
+                and (
+                    (menu_context == "user_devices" and d.get("user_id") == user_id)
+                    or (menu_context == "admin_panel" and user_role == "Admin")
+                )
+            ]
+
+    if not candidates:
+        msg = "Нет устройств для освобождения."
+    else:
+        for d in candidates:
+            d["status"] = "free"
+            prev_user = d.pop("user_id", None)
+            d.pop("booking_expiration", None)
+            who = "администратором" if user_role == "Admin" else "пользователем"
+            log_action(
+                d["sn"],
+                f"Освобождено {who} {get_user_full_name(user_id)} (ранее {prev_user})",
+            )
+        save_devices()
+        msg = (
+            "Все устройства успешно освобождены."
+            if release_all
+            else f"Устройство {candidates[0]['name']} (SN: {candidates[0]['sn']}) успешно освобождено."
+        )
+
+    if is_callback:
+        await src.edit_message_text(msg)
+        if menu_context == "admin_panel":
+            await all_booked_devices(update, context)
+    else:
+        await src.reply_text(
+            msg, reply_markup=get_main_menu_keyboard(user_id)
+        )
+
+
+# ==============================
+#   Админ-панель / просмотр всех бронирований
+# ==============================
+
+@access_control(required_role="Admin")
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text(
+            "У вас нет доступа к административному меню.",
+            reply_markup=get_main_menu_keyboard(user_id),
+        )
+        return
+
+    keyboard = [
+        ["Управление устройствами", "Управление пользователями"],
+        ["Просмотр забронированных устройств", "Назад"],
+    ]
+    await update.message.reply_text(
+        "Меню администрирования:",
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
+    )
+
+
+@access_control(required_role="Admin")
+async def all_booked_devices(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cleanup_expired_bookings()
+
+    is_callback = update.callback_query is not None
+    src = update.callback_query if is_callback else update.message
+
+    booked = [d for d in devices if d.get("status") == "booked"]
+
+    if not booked:
+        msg = "Нет забронированных устройств."
+        if is_callback:
+            await src.edit_message_text(msg)
+        else:
+            await src.reply_text(msg)
+        return
+
+    table = PrettyTable()
+    table.field_names = ["Название", "SN", "Дата окончания брони", "Пользователь"]
+    for d in booked:
+        table.add_row(
+            [
+                d["name"],
+                d["sn"],
+                format_datetime(d.get("booking_expiration")),
+                get_user_full_name(d.get("user_id")),
+            ]
+        )
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                f"Освободить {d['name']} (SN: {d['sn']})",
+                callback_data=f"release_{d['id']}",
+            )
+        ]
+        for d in booked
+    ]
+    keyboard.append(
+        [InlineKeyboardButton("Освободить все устройства", callback_data="release_all_devices")]
+    )
+    keyboard.append([InlineKeyboardButton("Назад", callback_data="admin_panel")])
+
+    msg = f"Список забронированных устройств:\n```\n{table}\n```"
+
+    context.user_data["menu_context"] = "admin_panel"
+    if is_callback:
+        await src.edit_message_text(
+            msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        await src.reply_text(
+            msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+
+# ==============================
+#   Управление устройствами (админ)
+# ==============================
+
+@access_control(required_role="Admin")
+async def manage_devices(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text(
+            "У вас нет доступа к управлению устройствами.",
+            reply_markup=get_main_menu_keyboard(user_id),
+        )
+        return
+
+    keyboard = [
+        [f"{d['name']} (SN: {d['sn']})", f"История {d['name']}"]
+        for d in devices
+    ]
+    keyboard.append(["Добавить устройство", "Импортировать устройства"])
+    keyboard.append(["Назад"])
+
+    await update.message.reply_text(
+        "Управление устройствами:",
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
+    )
+
+
+@access_control(required_role="Admin")
+async def manage_selected_device(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    try:
+        name_part, sn_part = text.split("(SN:")
+        name = name_part.strip()
+        sn = sn_part.replace(")", "").strip()
+    except ValueError:
+        await update.message.reply_text(
+            "Ошибка: некорректный формат данных устройства.",
+            reply_markup=ReplyKeyboardMarkup([["Назад"]], resize_keyboard=True),
+        )
+        return
+
+    device = next((d for d in devices if d["name"] == name and d["sn"] == sn), None)
+    if not device:
+        await update.message.reply_text("Устройство не найдено.")
+        return
+
+    keyboard = [
+        [f"Изменить имя устройства (ID: {device['id']})"],
+        [f"Удалить устройство (ID: {device['id']})"],
+        ["Назад"],
+    ]
+    await update.message.reply_text(
+        f"Управление устройством:\nНазвание: {device['name']}\nSN: {device['sn']}\nТип: {device['type']}",
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
+    )
+
+
+@access_control(required_role="Admin")
+async def edit_device_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    try:
+        device_id = int(text.split("(ID:")[1].replace(")", "").strip())
+    except (ValueError, IndexError):
+        await update.message.reply_text("Ошибка: некорректный формат ID устройства.")
+        return
+
+    device = next((d for d in devices if d.get("id") == device_id), None)
+    if not device:
+        await update.message.reply_text("Устройство не найдено.")
+        return
+
+    context.user_data["editing_device_id"] = device_id
+    await update.message.reply_text(
+        "Введите новое имя устройства:",
+        reply_markup=ReplyKeyboardMarkup([["Отмена"]], resize_keyboard=True),
+    )
+
+
+@access_control(required_role="Admin")
+async def process_edit_device_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    device_id = context.user_data.get("editing_device_id")
+    if not device_id:
+        return
+
+    new_name = update.message.text.strip()
+    if new_name.lower() == "отмена":
+        context.user_data.pop("editing_device_id", None)
+        await update.message.reply_text("Операция отменена.")
+        return
+
+    device = next((d for d in devices if d.get("id") == device_id), None)
+    if not device:
+        await update.message.reply_text("Устройство не найдено.")
+        context.user_data.pop("editing_device_id", None)
+        return
+
+    old_name = device["name"]
+    device["name"] = new_name
+    save_devices()
+    await update.message.reply_text(f"Имя устройства изменено: {old_name} → {new_name}")
+    context.user_data.pop("editing_device_id", None)
+
+
+@access_control(required_role="Admin")
+async def delete_device(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    try:
+        device_id = int(text.split("(ID:")[1].replace(")", "").strip())
+    except (ValueError, IndexError):
+        await update.message.reply_text("Ошибка: некорректный формат ID устройства.")
+        return
+
+    device = next((d for d in devices if d.get("id") == device_id), None)
+    if not device:
+        await update.message.reply_text("Устройство не найдено.")
+        return
+
+    devices.remove(device)
+    save_devices()
+    await update.message.reply_text(
+        f"Устройство {device['name']} (SN: {device['sn']}) успешно удалено.",
+        reply_markup=get_main_menu_keyboard(update.effective_user.id),
+    )
+
+
+@access_control(required_role="Admin")
+async def add_device(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Введите данные устройства в формате:\n"
+        "SN, Name, Type\n\nПример:\nSN001, Device-1, Phone",
+        reply_markup=ReplyKeyboardMarkup([["Назад"]], resize_keyboard=True),
+    )
+    context.user_data["awaiting_device_data"] = True
+
+
+@access_control(required_role="Admin")
+async def process_new_device(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("awaiting_device_data"):
+        return
+
+    line = update.message.text.strip()
+    if line.lower() == "назад":
+        context.user_data["awaiting_device_data"] = False
+        await update.message.reply_text(
+            "Отмена добавления устройства.",
+            reply_markup=get_main_menu_keyboard(update.effective_user.id),
+        )
+        return
+
+    try:
+        sn, name, dev_type = map(str.strip, line.split(","))
+    except ValueError:
+        await update.message.reply_text(
+            "Некорректный формат. Используйте: SN, Name, Type"
+        )
+        return
+
+    new_id = max((d.get("id", 0) for d in devices), default=0) + 1
+    devices.append(
+        {
+            "id": new_id,
+            "name": name,
+            "sn": sn,
+            "type": dev_type,
+            "status": "free",
+        }
+    )
+    save_devices()
+    context.user_data["awaiting_device_data"] = False
+    await update.message.reply_text(f"Устройство {name} успешно добавлено.")
+
+
+@access_control(required_role="Admin")
+async def import_devices(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Поддерживаем вызов только из текста ("Импортировать устройства")
+    await update.message.reply_text(
+        "Отправьте CSV файл с колонками: SN, Name, Type"
+    )
+    context.user_data["action"] = "import_devices"
+
+
+@access_control(required_role="Admin")
+async def process_import_devices(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get("action") != "import_devices":
+        return
+
+    file = update.message.document
+    if not file:
+        await update.message.reply_text("Ошибка: ожидается CSV файл.")
+        return
+
+    file_obj = await file.get_file()
+    file_path = await file_obj.download_to_drive()
+
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            required = {"SN", "Name", "Type"}
+            if not required.issubset(reader.fieldnames or []):
+                raise ValueError(
+                    "Неверный формат CSV. Нужны колонки: SN, Name, Type."
+                )
+
+            max_id = max((d.get("id", 0) for d in devices), default=0)
+            counter = 0
+            for row in reader:
+                max_id += 1
+                devices.append(
+                    {
+                        "id": max_id,
+                        "name": row["Name"].strip(),
+                        "sn": row["SN"].strip(),
+                        "type": row["Type"].strip(),
+                        "status": "free",
+                    }
+                )
+                counter += 1
+
+        save_devices()
+        await update.message.reply_text(
+            f"Устройства успешно импортированы. Добавлено: {counter}."
+        )
+    except FileNotFoundError:
+        await update.message.reply_text("Ошибка: файл не найден.")
+    except ValueError as e:
+        await update.message.reply_text(f"Ошибка: {e}")
+    finally:
+        try:
+            os.remove(file_path)
+        except OSError:
+            pass
+
+    context.user_data["action"] = None
+
+
+@access_control(required_role="Admin")
+async def view_device_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.replace("История", "").strip()
+    device = next((d for d in devices if d["name"] == text), None)
+    if not device:
+        await update.message.reply_text("Устройство не найдено.")
+        return
+
+    sn = device["sn"]
+    history = logs.get(sn, [])
+    if not history:
+        await update.message.reply_text(
+            f"История устройства {device['name']} (SN: {sn}) отсутствует.",
+            reply_markup=ReplyKeyboardMarkup([["Назад"]], resize_keyboard=True),
+        )
+        return
+
+    history_text = "\n".join(
+        f"{e['timestamp']}: {e['action']}" for e in history
+    )
+    await update.message.reply_text(
+        f"История устройства {device['name']} (SN: {sn}):\n{history_text}",
+        reply_markup=ReplyKeyboardMarkup([["Назад"]], resize_keyboard=True),
+    )
+
+
+# ==============================
+#   Управление пользователями (админ)
+# ==============================
+
+@access_control(required_role="Admin")
+async def manage_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    pending = [u for u in users if u.get("status") == "pending"]
+
+    keyboard = [
+        [f"Утвердить {u['user_id']}", f"Удалить {u['user_id']}"] for u in pending
+    ]
+
+    reg_status = "Выключить регистрацию" if registration_enabled else "Включить регистрацию"
+    keyboard.append([reg_status])
+    keyboard.append(["Список всех пользователей", "Назад"])
+
+    await update.message.reply_text(
+        "Управление пользователями:",
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
+    )
+
+
+@access_control(required_role="Admin")
+async def view_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                f"{u.get('first_name', '')} {u.get('last_name', '')} "
+                f"{u['user_id']} ({u.get('status')})",
+                callback_data=f"user_{u['user_id']}",
+            )
+        ]
+        for u in users
+    ]
+    keyboard.append([InlineKeyboardButton("Назад", callback_data="admin_panel")])
+    await update.message.reply_text(
+        "Список пользователей:", reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
@@ -148,959 +972,240 @@ async def manage_selected_user(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer()
 
-    # Проверяем, соответствует ли `query.data` ожидаемому формату
-    match = re.match(r"user_(\d+)", query.data)
+    match = re.match(r"user_(\d+)", query.data or "")
     if not match:
-        await query.message.reply_text("Ошибка: некорректные данные для выбора пользователя.")
+        await query.message.reply_text("Ошибка: некорректные данные для пользователя.")
         return
 
-    # Извлекаем user_id из callback_data
     user_id = int(match.group(1))
-
-    # Поиск пользователя по ID
-    selected_user = next((u for u in users if u["user_id"] == user_id), None)
-
-    if not selected_user:
-        await query.message.reply_text("Пользователь не найден.")
-        return
-
-    # Меню для управления пользователем
-    keyboard = [
-        [InlineKeyboardButton("Удалить пользователя", callback_data=f"delete_user_{user_id}")],
-        [InlineKeyboardButton("Забронированные устройства", callback_data=f"user_devices_{user_id}")],
-        [InlineKeyboardButton("Назад", callback_data="view_all_users")]
-    ]
-
-    await query.message.reply_text(
-        f"Управление пользователем:\nИмя: {selected_user['first_name']}\nФамилия: {selected_user['last_name']}\nСтатус: {selected_user['status']}",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-
-# Обработка редактирования пользователя
-@access_control(required_role="Admin")
-async def process_edit_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    action = context.user_data.get("action")
-    if action and action.startswith("edit_user_"):
-        user_id = int(action.split("_")[-1])
-        user = next((u for u in users if u["user_id"] == user_id), None)
-
-        if not user:
-            await update.message.reply_text("Пользователь не найден.")
-            return
-
-        try:
-            first_name, last_name, username, role = map(str.strip, update.message.text.split(","))
-        except ValueError:
-            await update.message.reply_text("Некорректный формат. Используйте: Имя, Фамилия, Username, Роль")
-            return
-
-        # Обновление данных пользователя
-        user.update({
-            "first_name": first_name,
-            "last_name": last_name,
-            "username": username,
-            "role": role
-        })
-        save_data("users.json", users)
-        await update.message.reply_text(f"Данные пользователя {first_name} {last_name} успешно обновлены.")
-        del context.user_data["action"]  # Удаляем состояние
-        await view_all_users(update, context)
-
-
-# Удаление пользователя
-@access_control(required_role="Admin")
-async def delete_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    # Извлекаем ID пользователя из callback_data
-    user_id = int(query.data.split("_")[2])
-
-    # Поиск пользователя по ID
-    user = next((u for u in users if u["user_id"] == user_id), None)
-
+    user = get_user_by_id(user_id)
     if not user:
         await query.message.reply_text("Пользователь не найден.")
         return
 
-    users.remove(user)
-    save_data("users.json", users)
-
+    keyboard = [
+        [InlineKeyboardButton("Удалить пользователя", callback_data=f"delete_user_{user_id}")],
+        [InlineKeyboardButton("Забронированные устройства", callback_data=f"user_devices_{user_id}")],
+        [InlineKeyboardButton("Назад", callback_data="view_all_users")],
+    ]
     await query.message.reply_text(
-        f"Пользователь {user['first_name']} {user['last_name']} удален.",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="view_all_users")]])
+        f"Управление пользователем:\n"
+        f"Имя: {user.get('first_name')}\n"
+        f"Фамилия: {user.get('last_name')}\n"
+        f"Статус: {user.get('status')}",
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
-@access_control()
-async def user_devices(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+@access_control(required_role="Admin")
+async def process_edit_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    action = context.user_data.get("action")
+    if not action or not action.startswith("edit_user_"):
+        return
 
-    # Извлекаем ID пользователя из callback_data
-    user_id = int(query.data.split("_")[2])
+    user_id = int(action.split("_")[-1])
+    user = get_user_by_id(user_id)
+    if not user:
+        await update.message.reply_text("Пользователь не найден.")
+        return
 
-    # Поиск устройств, забронированных пользователем
-    booked_devices = [device for device in devices if device.get("user_id") == user_id]
-
-    if not booked_devices:
-        await query.message.reply_text(
-            "У пользователя нет забронированных устройств.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data=f"user_{user_id}")]])
+    try:
+        first_name, last_name, username, role = map(
+            str.strip, update.message.text.split(",")
+        )
+    except ValueError:
+        await update.message.reply_text(
+            "Некорректный формат. Используйте: Имя, Фамилия, Username, Роль"
         )
         return
 
-    device_list = "\n".join([f"{d['name']} (SN: {d['sn']})" for d in booked_devices])
-
-    await query.message.reply_text(
-        f"Забронированные устройства пользователя:\n{device_list}",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data=f"user_{user_id}")]])
+    user.update(
+        {
+            "first_name": first_name,
+            "last_name": last_name,
+            "username": username,
+            "role": role,
+        }
     )
+    save_users()
+    await update.message.reply_text(
+        f"Данные пользователя {first_name} {last_name} успешно обновлены."
+    )
+    del context.user_data["action"]
+    await view_all_users(update, context)
 
 
-# Добавление нового пользователя
+@access_control(required_role="Admin")
+async def delete_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # поддержка и для callback, и для текстовой кнопки "Удалить <id>"
+    if update.callback_query:
+        query = update.callback_query
+        await query.answer()
+        match = re.match(r"delete_user_(\d+)", query.data or "")
+        if not match:
+            await query.message.reply_text("Ошибка обработки данных пользователя.")
+            return
+        user_id = int(match.group(1))
+        src_msg = query.message
+    else:
+        text = update.message.text.strip()
+        match = re.match(r"Удалить (\d+)", text)
+        if not match:
+            await update.message.reply_text("Ошибка обработки данных пользователя.")
+            return
+        user_id = int(match.group(1))
+        src_msg = update.message
+
+    user = get_user_by_id(user_id)
+    if not user:
+        await src_msg.reply_text("Пользователь не найден.")
+        return
+
+    users.remove(user)
+    save_users()
+    await src_msg.reply_text(f"Пользователь {user.get('username')} успешно удалён.")
+
+
 @access_control(required_role="Admin")
 async def add_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-
-    if not is_admin(user_id):
-        await update.message.reply_text(
-            "У вас нет доступа к добавлению пользователей.",
-            reply_markup=ReplyKeyboardMarkup([["Главное меню"]], resize_keyboard=True)
-        )
-        return
-
-    # Сообщение для ввода данных нового пользователя
     await update.message.reply_text(
         "Введите данные пользователя в формате:\n"
         "Имя Фамилия Username\n\nПример:\nИван Иванов ivan123",
-        reply_markup=ReplyKeyboardMarkup([["Назад"]], resize_keyboard=True)
+        reply_markup=ReplyKeyboardMarkup([["Назад"]], resize_keyboard=True),
     )
     context.user_data["awaiting_user_data"] = True
 
 
-# Обработка ввода нового пользователя
 @access_control(required_role="Admin")
 async def process_new_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get("awaiting_user_data"):
         return
 
-    user_data = update.message.text.strip()
+    text = update.message.text.strip()
+    if text.lower() == "назад":
+        context.user_data["awaiting_user_data"] = False
+        await update.message.reply_text(
+            "Отмена добавления пользователя.",
+            reply_markup=get_main_menu_keyboard(update.effective_user.id),
+        )
+        return
+
     try:
-        # Разделяем введенный текст на части
-        first_name, last_name, username = user_data.split()
+        first_name, last_name, username = text.split()
     except ValueError:
         await update.message.reply_text(
-            "Ошибка: данные должны быть введены в формате:\nИмя Фамилия Username\nПопробуйте еще раз.",
-            reply_markup=ReplyKeyboardMarkup([["Назад"]], resize_keyboard=True)
+            "Ошибка: данные должны быть введены в формате:\n"
+            "Имя Фамилия Username\nПопробуйте еще раз."
         )
         return
 
-    # Проверка на уникальность username
-    if any(user["username"] == username for user in users):
+    if any(u.get("username") == username for u in users):
         await update.message.reply_text(
-            f"Ошибка: пользователь с username {username} уже существует.",
-            reply_markup=ReplyKeyboardMarkup([["Назад"]], resize_keyboard=True)
+            f"Ошибка: пользователь с username {username} уже существует."
         )
         return
 
-    # Добавляем нового пользователя
-    new_user = {
-        "user_id": max(user["user_id"] for user in users) + 1 if users else 1,
-        "first_name": first_name,
-        "last_name": last_name,
-        "username": username,
-        "status": "approved"
-    }
-    users.append(new_user)
-    save_data("users.json", users)
-
-    # Подтверждение успешного добавления
+    new_id = max((u.get("user_id", 0) for u in users), default=0) + 1
+    users.append(
+        {
+            "user_id": new_id,
+            "first_name": first_name,
+            "last_name": last_name,
+            "username": username,
+            "role": "User",
+            "status": "approved",
+        }
+    )
+    save_users()
+    context.user_data["awaiting_user_data"] = False
     await update.message.reply_text(
         f"Пользователь {first_name} {last_name} ({username}) успешно добавлен.",
-        reply_markup=ReplyKeyboardMarkup([["Главное меню"]], resize_keyboard=True)
-    )
-    context.user_data["awaiting_user_data"] = False
-
-
-# Редактирование пользователя
-@access_control(required_role="Admin")
-async def edit_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    _, user_id = query.data.split("_")
-    user_id = int(user_id)
-
-    user = next((u for u in users if u["user_id"] == user_id), None)
-    if not user:
-        await query.message.reply_text("Пользователь не найден.")
-        return
-
-    context.user_data["action"] = f"edit_user_{user_id}"
-    await query.message.reply_text(
-        f"Редактирование пользователя {user['first_name']} {user['last_name']}.\n"
-        "Введите новые данные в формате: Имя, Фамилия, Username, Роль"
+        reply_markup=get_main_menu_keyboard(update.effective_user.id),
     )
 
 
-# Включение/выключение регистрации
-@access_control(required_role="Admin")
-async def toggle_registration(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global registration_enabled
-    registration_enabled = not registration_enabled
-
-    status = "включена" if registration_enabled else "выключена"
-    await update.message.reply_text(f"Регистрация {status}.")
-
-
-# Команда /register
-async def register_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global registration_enabled
-
-    if not registration_enabled:
-        await update.message.reply_text("Регистрация временно отключена.")
-        return
-
-    user_id = update.effective_user.id
-    username = update.effective_user.username or "Не указано"
-    first_name = update.effective_user.first_name or "Не указано"
-    last_name = update.effective_user.last_name or "Не указано"
-
-    # Проверка, если пользователь уже существует
-    for user in users:
-        if user["user_id"] == user_id:
-            await update.message.reply_text("Вы уже зарегистрированы или ваша заявка ожидает рассмотрения.")
-            return
-
-    # Добавление заявки в список пользователей
-    users.append({
-        "user_id": user_id,
-        "username": username,
-        "first_name": first_name,
-        "last_name": last_name,
-        "role": "User",
-        "status": "pending"
-    })
-    save_data("users.json", users)
-    await update.message.reply_text("Ваша заявка на регистрацию отправлена. Ожидайте подтверждения администратора.")
-
-
-# Одобрение заявки пользователя
 @access_control(required_role="Admin")
 async def approve_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-
-    if query:
-        await query.answer()  # Отвечаем на callback-запрос
-        message_text = query.data
+    if update.callback_query:
+        query = update.callback_query
+        await query.answer()
+        msg_text = query.data or ""
+        src_msg = query.message
     else:
-        # Если вызов был не через callback, используем текст сообщения
-        message_text = update.message.text.strip()
+        msg_text = update.message.text.strip()
+        src_msg = update.message
 
-    # Используем регулярное выражение для извлечения user_id
-    match = re.match(r"Утвердить (\d+)", message_text)
+    match = re.match(r"Утвердить (\d+)", msg_text)
     if not match:
-        await update.message.reply_text("Ошибка обработки данных пользователя.")
+        await src_msg.reply_text("Ошибка обработки данных пользователя.")
         return
 
-    user_id = int(match.group(1))  # Извлекаем user_id
-
-    user = next((u for u in users if u["user_id"] == user_id), None)
+    user_id = int(match.group(1))
+    user = get_user_by_id(user_id)
     if not user:
-        await update.message.reply_text("Пользователь не найден.")
+        await src_msg.reply_text("Пользователь не найден.")
         return
 
-    # Обновляем статус пользователя на "active"
     user["status"] = "active"
-    save_data("users.json", users)
+    save_users()
 
-    response_message = f"Пользователь {user['username']} успешно утвержден."
-    if query:
-        # Если вызов через callback, редактируем сообщение
-        await query.edit_message_text(response_message)
-    else:
-        # Если вызов через текстовое сообщение, отправляем обычный ответ
-        await update.message.reply_text(response_message)
+    await src_msg.reply_text(f"Пользователь {user.get('username')} успешно утвержден.")
 
 
-# Отклонение заявки пользователя
 @access_control(required_role="Admin")
 async def reject_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
-    # Используем регулярное выражение для извлечения user_id
-    match = re.match(r"reject_user_(\d+)", query.data)
+    match = re.match(r"reject_user_(\d+)", query.data or "")
     if not match:
         await query.message.reply_text("Ошибка обработки данных пользователя.")
         return
 
-    user_id = int(match.group(1))  # Извлекаем user_id
-
-    user = next((u for u in users if u["user_id"] == user_id), None)
+    user_id = int(match.group(1))
+    user = get_user_by_id(user_id)
     if not user:
         await query.message.reply_text("Пользователь не найден.")
         return
 
     users.remove(user)
-    save_data("users.json", users)
-    await query.message.reply_text(f"Пользователь {user['username']} успешно удален.")
-
-
-# Возврат в главное меню
-@access_control()
-async def return_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [["Список устройств", "Бронирование"], ["Мои устройства"]]
-    if is_admin(update.effective_user.id):
-        keyboard.append(["Администрирование"])
-
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    await update.message.reply_text("Главное меню:", reply_markup=reply_markup)
+    save_users()
+    await query.message.reply_text(f"Пользователь {user.get('username')} успешно удален.")
 
 
 @access_control()
-async def list_devices(update: Update, context: ContextTypes.DEFAULT_TYPE, status="all", device_type=None):
-    # Фильтрация устройств
-    filtered_devices = devices
-    if status != "all":
-        filtered_devices = [device for device in devices if device["status"] == status]
-    if device_type:
-        filtered_devices = [device for device in filtered_devices if device["type"] == device_type]
-
-    if not filtered_devices:
-        await update.message.reply_text("Нет устройств для отображения.")
-        return
-
-    # Сортировка и группировка устройств
-    grouped_devices = {}
-    for device in filtered_devices:
-        device_group = grouped_devices.setdefault(device["type"], [])
-        device_group.append(device)
-
-    # Создание таблицы
-    response_message = "Список устройств:\n"
-    for device_type, devices_group in sorted(grouped_devices.items()):
-        table = PrettyTable()
-        table.field_names = ["Название", "SN", "Статус", "Дата окончания брони", "Забронировано пользователем"]
-        for device in devices_group:
-            user_name = get_user_full_name(device.get("user_id")) if device.get("status") == "booked" else "-"
-            booking_expiration = device.get("booking_expiration", "Не указано")
-            if booking_expiration != "Не указано":
-                booking_expiration = format_datetime(booking_expiration)
-
-            table.add_row([
-                device["name"],
-                device["sn"],
-                "Свободно" if device["status"] == "free" else "Забронировано",
-                booking_expiration,
-                user_name
-            ])
-        response_message += f"\n{device_type}:\n```\n{table}\n```\n"
-
-    await update.message.reply_text(response_message, parse_mode="Markdown")
-
-
-# Бронирование устройства
-@access_control()
-async def book_device(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    device_types = list(set(device["type"] for device in devices if device["status"] == "free"))
-
-    if not device_types:
-        await update.message.reply_text("Нет доступных устройств для бронирования.")
-        return
-
-    # Клавиатура для выбора типа устройства
-    keyboard = [[device_type] for device_type in device_types]
-    keyboard.append(["Назад"])
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    await update.message.reply_text("Выберите тип устройства для бронирования:", reply_markup=reply_markup)
-
-
-@access_control()
-async def select_device(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    device_type = update.message.text.strip()  # Получаем текст выбранного типа устройства
-
-    # Фильтрация доступных устройств
-    available_devices = [d for d in devices if d["type"] == device_type and d["status"] == "free"]
-
-    if not available_devices:
-        await update.message.reply_text(
-            f"Нет доступных устройств типа {device_type}.",
-            reply_markup=ReplyKeyboardMarkup([["Назад"]], resize_keyboard=True)
-        )
-        return
-
-    # Генерация кнопок для выбора устройств
-    keyboard = [
-        [f"{d['name']} ({d['type']}) - ID {d['id']}"] for d in available_devices
-    ]
-    keyboard.append(["Назад"])  # Кнопка для возврата
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
-    await update.message.reply_text("Выберите устройство для бронирования:", reply_markup=reply_markup)
-
-
-# Подтверждение бронирования устройства
-@access_control()
-async def book_specific_device(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    device_text = update.message.text.strip()  # Получаем текст кнопки
-    print(f"Получен текст кнопки: {device_text}")  # Логирование для отладки
-
-    try:
-        # Извлечение ID устройства из текста кнопки
-        device_id = int(device_text.split(" - ID ")[-1])  # Парсим ID из текста
-    except (ValueError, IndexError):
-        await update.message.reply_text(
-            "Ошибка: некорректный формат данных устройства.",
-            reply_markup=ReplyKeyboardMarkup([["Назад"]], resize_keyboard=True)
-        )
-        return
-
-    # Поиск устройства по ID
-    device = next((d for d in devices if d["id"] == device_id and d["status"] == "free"), None)
-
-    if not device:
-        await update.message.reply_text(
-            "Ошибка: устройство не найдено или уже забронировано.",
-            reply_markup=ReplyKeyboardMarkup([["Назад"]], resize_keyboard=True)
-        )
-        return
-
-    # Получите данные устройства...
-    booking_period = device.get("default_booking_period", 1)
-    expiration_date = datetime.now() + timedelta(days=booking_period)
-
-    device["status"] = "booked"
-    device["user_id"] = update.effective_user.id
-    device["booking_expiration"] = expiration_date.isoformat()
-
-    save_data("devices.json", devices)
-
-    await update.message.reply_text(
-        f"Устройство {device['name']} (SN: {device['sn']}) забронировано до {expiration_date.strftime('%Y-%m-%d %H:%M:%S')}."
-    )
-
-    log_action(device["sn"], f"Устройство забронировано пользователем {get_user_full_name(update.effective_user.id)} до {expiration_date.strftime('%Y-%m-%d %H:%M:%S')}.")
-
-
-# Мои устройства
-@access_control()
-async def my_devices(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-
-    # Фильтруем устройства, забронированные текущим пользователем
-    user_devices = [device for device in devices if device.get("user_id") == user_id]
-
-    if not user_devices:
-        await update.message.reply_text("У вас нет забронированных устройств.")
-        return
-
-    # Генерация кнопок для освобождения устройств
-    reply_markup = ReplyKeyboardMarkup(
-        [[f"Освободить {d['name']} (SN: {d['sn']})"] for d in user_devices] + [["Освободить все устройства"], ["Назад"]],
-        resize_keyboard=True
-    )
-    # Создаём таблицу
-    table = PrettyTable()
-    table.field_names = ["Название", "SN", "Дата окончания брони"]
-    for device in user_devices:
-        table.add_row([
-            device["name"],
-            device["sn"],
-            format_datetime(device["booking_expiration"])
-        ])
-
-    await update.message.reply_text(f"Ваши забронированные устройства:\n```\n{table}\n```", parse_mode="Markdown", reply_markup=reply_markup)
-
-
-# Освободить устройство
-@access_control()
-async def release_devices(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user_role = get_user_role(user_id)
-
-    # Определяем источник вызова (команда, сообщение или callback-кнопка)
-    is_callback = hasattr(update, 'callback_query') and update.callback_query is not None
-    command_source = update.callback_query if is_callback else update.message
-    message_text = command_source.data if is_callback else command_source.text.strip()
-
-    # Определяем контекст меню
-    if is_callback and context.user_data.get("menu_context") != "admin_panel":
-        menu_context = "admin_panel" if user_role == "Admin" else "user_devices"
-    else:
-        menu_context = context.user_data.get("menu_context", "user_devices")  # По умолчанию меню пользователя
-
-    # Флаг освобождения всех устройств
-    release_all = message_text == "release_all_devices" or message_text == "Освободить все устройства"
-
-    # Освобождение всех устройств
-    if release_all:
-        devices_to_release = [
-            device for device in devices
-            if device["status"] == "booked" and
-            (menu_context == "user_devices" and device["user_id"] == user_id or
-             menu_context == "admin_panel" and user_role == "Admin")
-        ]
-    else:
-        # Освобождение конкретного устройства
-        if is_callback:
-            # Получаем ID устройства из callback_data
-            device_id = int(message_text.split("_")[1])
-            devices_to_release = [
-                device for device in devices
-                if device["id"] == device_id and device["status"] == "booked" and
-                (menu_context == "user_devices" and device["user_id"] == user_id or
-                 menu_context == "admin_panel" and user_role == "Admin")
-            ]
-        else:
-            # Для текстовых команд
-            match = re.match(r"Освободить (.+?) \(SN: (.+?)\)", message_text)
-            if not match:
-                await command_source.reply_text(
-                    "Ошибка: некорректный формат команды.",
-                    reply_markup=ReplyKeyboardMarkup([["Назад"]], resize_keyboard=True)
-                )
-                return
-            device_name, device_sn = match.groups()
-            devices_to_release = [
-                device for device in devices
-                if device["name"] == device_name and device["sn"] == device_sn and device["status"] == "booked" and
-                (menu_context == "user_devices" and device["user_id"] == user_id or
-                 menu_context == "admin_panel" and user_role == "Admin")
-            ]
-
-    if not devices_to_release:
-        response_message = "Нет устройств для освобождения."
-    else:
-        # Освобождаем устройства
-        for device in devices_to_release:
-            device["status"] = "free"
-            device.pop("user_id", None)
-            device.pop("booking_expiration", None)
-            log_action(device["sn"], f"Освобождено {'администратором' if user_role == 'Admin' else 'пользователем'} {get_user_full_name(user_id)}")
-
-        save_data("devices.json", devices)
-
-        response_message = (
-            "Все устройства успешно освобождены."
-            if release_all else
-            f"Устройство {devices_to_release[0]['name']} (SN: {devices_to_release[0]['sn']}) успешно освобождено."
-        )
-
-    # Ответ пользователю
-    if is_callback:
-        await command_source.edit_message_text(response_message)
-    else:
-        await command_source.reply_text(
-            response_message,
-            reply_markup=ReplyKeyboardMarkup([["Главное меню"]], resize_keyboard=True)
-        )
-
-    # Возвращение к списку устройств, если вызов из меню администратора
-    if menu_context == "admin_panel" and is_callback:
-        await all_booked_devices(update, context)
-
-
-# Панель администрирования
-@access_control(required_role="Admin")
-async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-
-    if not is_admin(user_id):
-        await update.message.reply_text("У вас нет доступа к административному меню.", reply_markup=ReplyKeyboardMarkup([["Главное меню"]], resize_keyboard=True))
-        return
-
-    # Клавиатура для администрирования
-    keyboard = [
-        ["Управление устройствами", "Управление пользователями"],
-        ["Просмотр забронированных устройств", "Назад"]
-    ]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
-    await update.message.reply_text("Меню администрирования:", reply_markup=reply_markup)
-
-
-# Просмотр забронированных устройств
-@access_control(required_role="Admin")
-async def all_booked_devices(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Определяем источник вызова
-    is_callback = hasattr(update, 'callback_query') and update.callback_query is not None
-    command_source = update.callback_query if is_callback else update.message
-
-    # Фильтруем только забронированные устройства
-    booked_devices = [device for device in devices if device["status"] == "booked"]
-
-    if not booked_devices:
-        response_message = "Нет забронированных устройств."
-        if is_callback:
-            await command_source.edit_message_text(response_message)
-        else:
-            await command_source.reply_text(response_message)
-        return
-
-    # Создаём таблицу
-    table = PrettyTable()
-    table.field_names = ["Название", "SN", "Дата окончания брони", "Забронировано пользователем"]
-    for device in booked_devices:
-        user_name = get_user_full_name(device.get("user_id"))
-        booking_expiration = format_datetime(device.get("booking_expiration", "Не указано"))
-        table.add_row([
-            device["name"],
-            device["sn"],
-            booking_expiration,
-            user_name
-        ])
-
-    # Формируем кнопки для освобождения устройств
-    keyboard = [
-        [InlineKeyboardButton(f"Освободить {device['name']} (SN: {device['sn']})", callback_data=f"release_{device['id']}")]
-        for device in booked_devices
-    ]
-    keyboard.append([InlineKeyboardButton("Освободить все устройства", callback_data="release_all_devices")])
-    keyboard.append([InlineKeyboardButton("Назад", callback_data="admin_panel")])
-
-    response_message = f"Список забронированных устройств:\n```\n{table}\n```"
-    if is_callback:
-        await command_source.edit_message_text(
-            response_message,
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-    else:
-        await command_source.reply_text(
-            response_message,
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-
-
-@access_control(required_role="Admin")
-async def admin_release_device(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def user_devices_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    # Извлекаем device_id и sn из callback_data
-    _, device_id_str, device_sn = query.data.split("_", 2)
-    device_id = int(device_id_str)
-
-    user_id = query.from_user.id
-    if not is_admin(user_id):
-        await query.message.reply_text("У вас нет доступа к этой функции.")
+    match = re.match(r"user_devices_(\d+)", query.data or "")
+    if not match:
+        await query.message.reply_text("Ошибка данных пользователя.")
         return
+    user_id = int(match.group(1))
 
-    for device_type, items in devices:
-        for device in items:
-            if device["id"] == device_id and device["sn"] == device_sn and device["status"] == "booked":
-                log_action("ADMIN RELEASED", device["user_id"], device["name"], device["sn"])
-                device["status"] = "free"
-                device.pop("user_id", None)
-                save_data("devices.json", devices)
-                await query.message.reply_text(f"Устройство {device['name']} (SN: {device['sn']}) освобождено.")
-                await all_booked_devices(update, context)
-                return
-
-    await query.message.reply_text("Ошибка: устройство не найдено или уже освобождено.")
-    await return_to_main_menu(update, context)
-
-
-@access_control(required_role="Admin")
-async def admin_release_all_devices(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    user_id = query.from_user.id
-    if not is_admin(user_id):
-        await query.message.reply_text("У вас нет доступа к этой функции.")
-        return
-
-    # Флаг для проверки, были ли устройства освобождены
-    released_any = False
-
-    for device in devices:
-        if device["status"] == "booked":
-            log_action("ADMIN RELEASED", device["user_id"], device["name"], device["sn"])
-            device["status"] = "free"
-            device.pop("user_id", None)
-            released_any = True
-
-    if released_any:
-        save_data("devices.json", devices)
-        await query.message.reply_text("Все забронированные устройства успешно освобождены.")
-    else:
-        await query.message.reply_text("Нет забронированных устройств.")
-    await return_to_main_menu(update, context)
-
-
-# Освобождение всех устройств (для администраторов)
-async def release_all_devices(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    if not is_admin(user_id):
-        await query.message.reply_text("У вас нет доступа к этой функции.")
-        return
-
-    for device_type, items in devices:
-        for device in items:
-            if device["status"] == "booked":
-                log_action("RELEASED", device["user_id"], device["name"], device["sn"])
-                device["status"] = "free"
-                device.pop("user_id", None)
-
-    save_data("devices.json", devices)
-    await query.message.reply_text("Все устройства успешно освобождены.")
-    await return_to_main_menu(update, context)
-
-
-# Управление устройствами
-async def manage_devices(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-
-    if not is_admin(user_id):
-        await update.message.reply_text(
-            "У вас нет доступа к управлению устройствами.",
-            reply_markup=ReplyKeyboardMarkup([["Главное меню"]], resize_keyboard=True)
+    user_devs = [d for d in devices if d.get("user_id") == user_id]
+    if not user_devs:
+        await query.message.reply_text(
+            "У пользователя нет забронированных устройств.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("Назад", callback_data=f"user_{user_id}")]]
+            ),
         )
         return
 
-    keyboard = [
-        [
-            f"{device['name']} (SN: {device['sn']})",
-            f"История {device['name']}"
-        ]
-        for device in devices
-    ]
-    keyboard.append(["Добавить устройство", "Импортировать устройства"])
-    keyboard.append(["Назад"])
-
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
-    await update.message.reply_text(
-        "Управление устройствами:",
-        reply_markup=reply_markup
-    )
-
-
-@access_control(required_role="Admin")
-async def manage_selected_device(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    device_text = update.message.text.strip()
-
-    try:
-        # Извлекаем название и SN устройства из текста
-        name_part, sn_part = device_text.split("(SN:")
-        device_name = name_part.strip()
-        device_sn = sn_part.replace(")", "").strip()
-    except ValueError:
-        await update.message.reply_text(
-            "Ошибка: некорректный формат данных устройства.",
-            reply_markup=ReplyKeyboardMarkup([["Назад"]], resize_keyboard=True)
-        )
-        return
-
-    # Поиск устройства в списке
-    device = next((d for d in devices if d["name"] == device_name and d["sn"] == device_sn), None)
-
-    if not device:
-        await update.message.reply_text("Устройство не найдено.")
-        return
-
-    # Меню управления устройством
-    keyboard = [
-        [f"Изменить имя устройства (ID: {device['id']})"],
-        [f"Удалить устройство (ID: {device['id']})"],
-        ["Назад"]
-    ]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
-    await update.message.reply_text(
-        f"Управление устройством:\nНазвание: {device['name']}\nSN: {device['sn']}\nТип: {device['type']}",
-        reply_markup=reply_markup
-    )
-
-
-@access_control(required_role="Admin")
-async def edit_device_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    device_id_text = update.message.text.strip()
-
-    try:
-        # Извлекаем ID устройства
-        device_id = int(device_id_text.split("(ID:")[1].replace(")", "").strip())
-    except (ValueError, IndexError):
-        await update.message.reply_text("Ошибка: некорректный формат ID устройства.")
-        return
-
-    device = next((d for d in devices if d["id"] == device_id), None)
-
-    if not device:
-        await update.message.reply_text("Устройство не найдено.")
-        return
-
-    context.user_data["editing_device_id"] = device_id
-    await update.message.reply_text(
-        "Введите новое имя устройства:",
-        reply_markup=ReplyKeyboardMarkup([["Отмена"]], resize_keyboard=True)
-    )
-
-
-@access_control(required_role="Admin")
-async def edit_device(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    # Извлечение ID устройства
-    device_id = int(query.data.split("_")[1])
-
-    # Поиск устройства по ID
-    device = next((d for d in devices if d["id"] == device_id), None)
-
-    if not device:
-        await query.message.reply_text("Устройство не найдено.")
-        return
-
+    dev_list = "\n".join([f"{d['name']} (SN: {d['sn']})" for d in user_devs])
     await query.message.reply_text(
-        f"Редактирование устройства {device['name']} (SN: {device['sn']}):",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Изменить имя", callback_data=f"edit_name_{device_id}")],
-            [InlineKeyboardButton("Изменить SN", callback_data=f"edit_sn_{device_id}")],
-            [InlineKeyboardButton("Удалить устройство", callback_data=f"delete_device_{device_id}")],
-            [InlineKeyboardButton("Назад", callback_data="manage_devices")]
-        ])
+        f"Забронированные устройства пользователя:\n{dev_list}",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("Назад", callback_data=f"user_{user_id}")]]
+        ),
     )
 
 
-# Добавление устройства
-@access_control(required_role="Admin")
-async def add_device(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Введите данные устройства в формате:\n"
-        "Название Тип SN\n\nПример:\nDevice-1 Phone SN001",
-        reply_markup=ReplyKeyboardMarkup([["Назад"]], resize_keyboard=True)
-    )
-    context.user_data["awaiting_device_data"] = True
+# ==============================
+#   Неизвестные сообщения
+# ==============================
 
-
-@access_control(required_role="Admin")
-async def delete_device(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    device_id_text = update.message.text.strip()
-
-    try:
-        # Извлекаем ID устройства
-        device_id = int(device_id_text.split("(ID:")[1].replace(")", "").strip())
-    except (ValueError, IndexError):
-        await update.message.reply_text("Ошибка: некорректный формат ID устройства.")
-        return
-
-    device = next((d for d in devices if d["id"] == device_id), None)
-
-    if not device:
-        await update.message.reply_text("Устройство не найдено.")
-        return
-
-    devices.remove(device)
-    save_data("devices.json", devices)
-
-    await update.message.reply_text(
-        f"Устройство {device['name']} (SN: {device['sn']}) успешно удалено.",
-        reply_markup=ReplyKeyboardMarkup([["Главное меню"]], resize_keyboard=True)
-    )
-
-
-# Обработка импорта устройств
-@access_control(required_role="Admin")
-async def import_devices(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    context.user_data["action"] = "import_devices"
-    await query.message.reply_text("Отправьте CSV файл с колонками: SN, Name, Type")
-
-
-def load_logs(filename="device_logs.json"):
-    if os.path.exists(filename):
-        with open(filename, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}  # Возвращает пустой словарь, если файл не найден
-
-logs = load_logs()
-
-
-# Просмотр истории бронирований устройства
-@access_control(required_role="Admin")
-async def view_device_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    device_name = update.message.text.replace("История", "").strip()
-    device = next((d for d in devices if d["name"] == device_name), None)
-
-    if not device:
-        await update.message.reply_text("Устройство не найдено.")
-        return
-
-    device_sn = device["sn"]
-    history = logs.get(device_sn, [])
-
-    if not history:
-        await update.message.reply_text(
-            f"История устройства {device_name} (SN: {device_sn}) отсутствует.",
-            reply_markup=ReplyKeyboardMarkup([["Назад"]], resize_keyboard=True)
-        )
-        return
-
-    # Форматируем историю
-    history_text = "\n".join(
-        f"{entry['timestamp']}: {entry['action']}" for entry in history
-    )
-
-    await update.message.reply_text(
-        f"История устройства {device_name} (SN: {device_sn}):\n{history_text}",
-        reply_markup=ReplyKeyboardMarkup([["Назад"]], resize_keyboard=True)
-    )
-
-
-
-# Обработка ввода нового устройства
-@access_control(required_role="Admin")
-async def process_new_device(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.user_data.get("action") == "add_device":
-        try:
-            sn, name, device_type = map(str.strip, update.message.text.split(","))
-        except ValueError:
-            await update.message.reply_text("Некорректный формат. Используйте: SN, Name, Type")
-            return
-
-        if device_type not in devices:
-            devices[device_type] = []
-
-        devices[device_type].append({
-            "id": len(devices[device_type]) + 1,
-            "name": name,
-            "sn": sn,
-            "status": "free"
-        })
-        save_data("devices.json", devices)
-        await update.message.reply_text(f"Устройство {name} успешно добавлено.")
-        await return_to_main_menu(update, context)
-
-
-def log_action(device_sn, action):
-    if device_sn not in logs:
-        logs[device_sn] = []
-    logs[device_sn].append({
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "action": action
-    })
-    save_logs()
-
-
-def save_logs(filename="device_logs.json"):
-    with open(filename, "w", encoding="utf-8") as f:
-        json.dump(logs, f, ensure_ascii=False, indent=4)
-
-
-def is_admin(user_id):
-    return get_user_role(user_id) == "Admin"
-
-
-# Обработка неизвестных сообщений
 async def unknown_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Неизвестная команда или сообщение. Вот список доступных команд:\n"
@@ -1108,125 +1213,75 @@ async def unknown_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await help_command(update, context)
     await return_to_main_menu(update, context)
 
-# Справка
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Команды:\n"
-        "/start - Главное меню\n"
-        "/help - Справка\n"
-        "/register - Зарегистрироваться\n"
-        "\nДоступные функции зависят от вашей роли."
-    )
 
-# Обработка импорта устройств из CSV
-@access_control(required_role="Admin")
-async def process_import_devices(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.user_data.get("action") == "import_devices":
-        file = update.message.document
-        file_object = await file.get_file()  # Асинхронный метод получения файла
-        file_path = await file_object.download_to_drive()
+# ==============================
+#   Точка входа
+# ==============================
 
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                # Проверка колонок
-                required_columns = {"SN", "Name", "Type"}
-                if not required_columns.issubset(set(reader.fieldnames)):
-                    raise ValueError("Неверный формат файла CSV. Отсутствуют обязательные колонки: SN, Name, Type.")
-                for row in reader:
-                    device_type = row["Type"].strip()
-                    if device_type not in devices:
-                        devices[device_type] = []
-
-                    devices[device_type].append({
-                        "id": len(devices[device_type]) + 1,
-                        "name": row["Name"].strip(),
-                        "sn": row["SN"].strip(),
-                        "status": "free"
-                    })
-
-            save_data("devices.json", devices)
-            await update.message.reply_text("Устройства успешно импортированы.")
-        except FileNotFoundError:
-            await update.message.reply_text("Ошибка: файл не найден.")
-        except ValueError as ve:
-            await update.message.reply_text(f"Ошибка: {ve}")
-        finally:
-            os.remove(file_path)  # Удаляем временный файл
-
-
-def format_datetime(iso_datetime):
-    if not iso_datetime:
-        return "Не указано"
-    dt = datetime.fromisoformat(iso_datetime)
-    return dt.strftime("%d.%m.%Y %H:%M")
-
-@access_control()
-async def go_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await return_to_main_menu(update, context)
-
-
-# Основная функция
-def main():
+def main() -> None:
+    load_all_data()
     app = Application.builder().token(config["bot_token"]).build()
 
-    # Обработчики команд
+    # Команды
     app.add_handler(CommandHandler("start", return_to_main_menu))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("register", register_user))
-    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Назад$"), go_back))
 
-    # Текстовые кнопки
-    app.add_handler(MessageHandler(filters.TEXT & (filters.Regex("^Список устройств$")), list_devices))
+    # Основные текстовые кнопки
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Назад$"), go_back))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Главное меню$"), return_to_main_menu))
+
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Список устройств$"), list_devices))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Бронирование$"), book_device))
+    # тип устройства — любые строки из config["device_types"]
+    type_pattern = "^(" + "|".join(re.escape(t) for t in config.get("device_types", [])) + ")$"
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(type_pattern), select_device))
+
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r".* - ID \d+$"), book_specific_device))
-    app.add_handler(MessageHandler(filters.TEXT & (filters.Regex("^Бронирование$")), book_device))
-    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^(Phone|Tablet|PC|RKBoard)$"), select_device))
-    app.add_handler(MessageHandler(filters.TEXT & (filters.Regex("^Мои устройства$")), my_devices))
-    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Администрирование$"), admin_panel))
-    app.add_handler(MessageHandler(filters.TEXT & (filters.Regex("^Назад$")), go_back))
-    app.add_handler(MessageHandler(filters.TEXT & (filters.Regex("^Главное меню")), return_to_main_menu))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Мои устройства$"), my_devices))
+
+    # Освобождение устройств (пользователь)
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Освободить .* \\(SN: .*\\)$"), release_devices))
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Освободить все устройства$"), release_devices))
-    app.add_handler(CallbackQueryHandler(release_devices, pattern="release_.*"))
-    app.add_handler(CallbackQueryHandler(release_devices, pattern="release_all_devices"))
+    app.add_handler(CallbackQueryHandler(release_devices, pattern="^release_.*"))
+    app.add_handler(CallbackQueryHandler(release_devices, pattern="^release_all_devices$"))
+
+    # Админ-панель
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Администрирование$"), admin_panel))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Просмотр забронированных устройств$"), all_booked_devices))
 
     # Управление устройствами
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Управление устройствами$"), manage_devices))
-    app.add_handler(CallbackQueryHandler(add_device, pattern="add_device"))
-    app.add_handler(CallbackQueryHandler(import_devices, pattern="import_devices"))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Добавить устройство$"), add_device))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Импортировать устройства$"), import_devices))
     app.add_handler(MessageHandler(filters.Document.FileExtension("csv"), process_import_devices))
-    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Устройство:.*"), process_new_device))
-    app.add_handler(
-        MessageHandler(filters.TEXT & filters.Regex("^Просмотр забронированных устройств$"), all_booked_devices))
-    app.add_handler(CallbackQueryHandler(view_device_history, pattern="history_.*"))
-    app.add_handler(CallbackQueryHandler(edit_device, pattern="edit_device_.*"))
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^.* \\(SN: .*\\)$"), manage_selected_device))
-    app.add_handler(
-        MessageHandler(filters.TEXT & filters.Regex("^Изменить имя устройства \\(ID: .*\\)$"), edit_device_name))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Изменить имя устройства \\(ID: .*\\)$"), edit_device_name))
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Удалить устройство \\(ID: .*\\)$"), delete_device))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_new_device))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_edit_device_name))
 
     # Управление пользователями
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Управление пользователями$"), manage_users))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Список всех пользователей$"), view_all_users))
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Включить регистрацию$"), toggle_registration))
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Выключить регистрацию$"), toggle_registration))
-    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Управление пользователями$"), manage_users))
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Утвердить .*"), approve_user))
-    app.add_handler(CallbackQueryHandler(reject_user, pattern="reject_user_.*"))
-    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Список всех пользователей$"), view_all_users))
-    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Добавить пользователя$"), add_user))
-    app.add_handler(CallbackQueryHandler(edit_user, pattern="edit_user_.*"))
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Удалить .*"), delete_user))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Добавить пользователя$"), add_user))
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Пользователь:.*"), process_new_user))
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Редактировать пользователя:.*"), process_edit_user))
 
-    app.add_handler(CallbackQueryHandler(view_all_users, pattern="view_all_users"))
-    app.add_handler(CallbackQueryHandler(manage_selected_user, pattern="user_.*"))
-    app.add_handler(CallbackQueryHandler(delete_user, pattern="delete_user_.*"))
-    app.add_handler(CallbackQueryHandler(user_devices, pattern="user_devices_.*"))
+    app.add_handler(CallbackQueryHandler(view_all_users, pattern="^view_all_users$"))
+    app.add_handler(CallbackQueryHandler(manage_selected_user, pattern="^user_.*"))
+    app.add_handler(CallbackQueryHandler(delete_user, pattern="^delete_user_.*"))
+    app.add_handler(CallbackQueryHandler(user_devices_admin, pattern="^user_devices_.*"))
 
-    # Обработчик для неизвестных сообщений должен быть последним
+    # Неизвестные сообщения — в самом конце
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, unknown_message))
 
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
