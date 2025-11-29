@@ -19,6 +19,12 @@ The Device Booking Bot is a Telegram bot designed to streamline the management o
    - View the list of all devices and their statuses.
    - View your currently booked devices.
 
+2. **Scanning QR Codes and Serial Numbers**:
+   - Scan QR codes or barcodes using the built-in Telegram scanner.
+   - Take a photo of a device with a printed serial number - the bot will automatically recognize it using OCR.
+   - Manually enter the serial number (full or partial).
+   - The bot will find the device and offer actions (book, release, or transfer).
+
 2. **User Registration**:
    - Register using the `/register` command if the registration mode is enabled.
    - Wait for administrator approval for activation.
@@ -58,6 +64,24 @@ The Device Booking Bot is a Telegram bot designed to streamline the management o
 - `/toggle_registration` — Enable or disable the registration mode.
 
 ---
+
+## **Installation**
+
+### **Dependencies**
+
+Install required packages:
+
+```bash
+pip install -r requirements.txt
+```
+
+**Note:** For OCR functionality (recognizing serial numbers from photos), you need to install `easyocr`:
+
+```bash
+pip install easyocr
+```
+
+The first time you use OCR, it will download language models (this may take a few minutes).
 
 ## **How to Use**
 

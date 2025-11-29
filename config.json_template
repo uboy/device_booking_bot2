@@ -1,7 +1,10 @@
 {
-  "bot_token": "YOUR_TELEGRAM_BOT_TOKEN_HERE",
+  "bot_token": "YOUR_TELEGRAM_BOT_TOKEN",
   "admin_ids": [123456789],
-  "device_types": ["Tablet", "Phone", "PC", "RKBoard"],
+  "device_types": ["Phone", "Tablet", "PC", "RKBoard"],
   "registration_enabled": true,
-  "default_booking_period_days": 1
+  "default_booking_period_days": 1,
+  "max_devices_per_user": 2,
+  "notify_before_minutes": 60,
+  "webapp_url": "https://your-webapp-url.example.com"
 }

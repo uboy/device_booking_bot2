@@ -1,0 +1,176 @@
+
+:root {
+  --tg-bg: var(--tg-theme-bg-color, #ffffff);
+  --tg-text: var(--tg-theme-text-color, #000000);
+  --tg-hint: var(--tg-theme-hint-color, #8e8e93);
+  --tg-button: var(--tg-theme-button-color, #3390ec);
+  --tg-button-text: var(--tg-theme-button-text-color, #ffffff);
+  --tg-sec-bg: var(--tg-theme-secondary-bg-color, #f1f1f3);
+  --tg-danger-bg: #ffebee;
+  --tg-danger-text: #c62828;
+  --tg-success-bg: #e8f5e9;
+  --tg-success-text: #2e7d32;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
+  background: var(--tg-bg);
+  color: var(--tg-text);
+}
+
+.app {
+  min-height: 100vh;
+  padding: 16px 16px 90px;
+  display: flex;
+  flex-direction: column;
+  max-width: 480px;
+  margin: 0 auto;
+}
+
+.app-header {
+  text-align: center;
+  margin-bottom: 16px;
+}
+
+.app-header h1 {
+  margin: 0 0 4px;
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.subtitle {
+  margin: 0;
+  font-size: 14px;
+  color: var(--tg-hint);
+}
+
+.app-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.btn {
+  border: none;
+  border-radius: 14px;
+  padding: 14px 16px;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.1s ease, opacity 0.15s ease;
+}
+
+.btn:active {
+  transform: scale(0.97);
+  opacity: 0.8;
+}
+
+.btn.primary {
+  background: var(--tg-button);
+  color: var(--tg-button-text);
+}
+
+.btn.secondary {
+  background: var(--tg-sec-bg);
+  color: var(--tg-text);
+}
+
+.video-wrapper {
+  position: relative;
+  display: none;
+  overflow: hidden;
+  border-radius: 16px;
+  background: #000;
+}
+
+.video-wrapper video {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.capture-btn {
+  position: fixed;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  border: 4px solid #ffffff;
+  background: var(--tg-button);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+  display: none;
+  z-index: 999;
+}
+
+.status {
+  display: none;
+  padding: 10px 12px;
+  border-radius: 12px;
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.status.info {
+  background: var(--tg-sec-bg);
+  color: var(--tg-text);
+}
+
+.status.error {
+  background: var(--tg-danger-bg);
+  color: var(--tg-danger-text);
+}
+
+.status.success {
+  background: var(--tg-success-bg);
+  color: var(--tg-success-text);
+}
+
+.result {
+  display: none;
+  padding: 14px 14px 16px;
+  border-radius: 16px;
+  background: var(--tg-sec-bg);
+}
+
+.result-title {
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.result-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 14px;
+  background: var(--tg-bg);
+  padding: 10px;
+  border-radius: 10px;
+  word-wrap: break-word;
+  word-break: break-all;
+}
+
+.result-actions {
+  margin-top: 12px;
+  display: flex;
+  gap: 10px;
+}
+
+.result-actions .btn {
+  flex: 1;
+}

@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <title>Сканер устройств</title>
+
+  <link rel="stylesheet" href="/style.css" />
+
+  <!-- Telegram Web App API (официальный скрипт) -->
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  
+  <!-- jsQR для сканирования QR-кодов -->
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+</head>
+<body>
+  <div class="app">
+    <header class="app-header">
+      <h1>📷 Сканер устройств</h1>
+      <p class="subtitle">Выберите способ сканирования</p>
+    </header>
+
+    <main class="app-main">
+      <div class="buttons">
+        <button class="btn primary" id="btn-qr">📱 Сканировать QR-код</button>
+        <button class="btn secondary" id="btn-photo">📷 Сфотографировать серийный номер</button>
+      </div>
+
+      <div class="video-wrapper" id="video-wrapper">
+        <video id="video" autoplay playsinline muted></video>
+      </div>
+
+      <button class="capture-btn" id="capture-btn"></button>
+
+      <div class="status" id="status"></div>
+
+      <section class="result" id="result">
+        <div class="result-title">✅ Код распознан:</div>
+        <div class="result-code" id="result-code"></div>
+        <div class="result-actions">
+          <button class="btn primary" id="btn-send">Отправить в бот</button>
+          <button class="btn secondary" id="btn-retry">Попробовать ещё раз</button>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
