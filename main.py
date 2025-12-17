@@ -99,6 +99,7 @@ def _register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("start", start_menu))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("register", register_user))
+    app.add_handler(CommandHandler("set_name", set_name_command))
 
     # Кнопки навигации
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Назад$"), go_back))
@@ -166,6 +167,8 @@ def _register_handlers(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(import_devices_csv, pattern="^import_devices_admin$"))
     app.add_handler(CallbackQueryHandler(approve_user_callback, pattern="^approve_user_.*"))
     app.add_handler(CallbackQueryHandler(reject_user_callback, pattern="^reject_user_.*"))
+    app.add_handler(CallbackQueryHandler(block_user_callback, pattern="^block_user_.*"))
+    app.add_handler(CallbackQueryHandler(unblock_user_callback, pattern="^unblock_user_.*"))
     app.add_handler(CallbackQueryHandler(add_user_callback, pattern="^add_user$"))
     app.add_handler(CallbackQueryHandler(edit_user_callback, pattern="^edit_user_.*"))
     app.add_handler(CallbackQueryHandler(delete_user_callback, pattern="^delete_user_.*"))

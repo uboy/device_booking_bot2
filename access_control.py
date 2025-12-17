@@ -64,6 +64,10 @@ def access_control(required_status: str = "active", required_role: Optional[str]
                 else:
                     return await func(update, context, *args, **kwargs)
 
+            # Игнорируем заблокированных пользователей
+            if db_user.get("status") == "blocked":
+                return
+
             status = db_user.get("status")
             if required_status and status != required_status:
                 await msg.reply_text(
