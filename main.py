@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 import logging
+import os
+from logging.handlers import RotatingFileHandler
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -9,6 +12,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from telegram.ext.filters import MessageFilter
 
 import storage
 from handlers import (
@@ -96,8 +100,66 @@ from handlers import (
 )
 
 
+def _setup_logging() -> None:
+    """Configure logging with console + rotating file handlers."""
+    log_level_name = os.getenv("LOG_LEVEL", "INFO").upper()
+    log_level = getattr(logging, log_level_name, logging.INFO)
+
+    data_dir = os.getenv("DATA_DIR", ".")
+    log_dir = os.path.join(data_dir, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.getenv("LOG_FILE", os.path.join(log_dir, "bot.log"))
+
+    fmt = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+    root = logging.getLogger()
+    root.setLevel(log_level)
+    for h in list(root.handlers):
+        root.removeHandler(h)
+
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(log_level)
+    console_handler.setFormatter(logging.Formatter(fmt))
+    root.addHandler(console_handler)
+
+    file_handler = RotatingFileHandler(log_file, maxBytes=1_000_000, backupCount=5, encoding="utf-8")
+    file_handler.setLevel(log_level)
+    file_handler.setFormatter(logging.Formatter(fmt))
+    root.addHandler(file_handler)
+
+    logging.captureWarnings(True)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+class _HasWebAppData(MessageFilter):
+    def filter(self, message):
+        return getattr(message, "web_app_data", None) is not None
+
+
+async def _log_raw_update(update: Update, context):
+    """Логирует любое входящее обновление целиком (для диагностики)."""
+    try:
+        payload = json.dumps(update.to_dict(), ensure_ascii=False)[:4000]
+    except Exception:
+        payload = str(update)
+    logging.getLogger(__name__).debug("RAW UPDATE: %s", payload)
+
+
 def _register_handlers(app: Application) -> None:
     """Регистрирует все хендлеры в одном месте, без дублирования."""
+    # Глобальный лог всех апдейтов (диагностика)
+    app.add_handler(MessageHandler(filters.ALL, _log_raw_update), group=-2)
+
+    # WebApp данные должны обрабатываться первыми, иначе сервисные сообщения с текстом кнопки
+    # могут попасть в общие текстовые хендлеры и быть проигнорированы.
+    app.add_handler(
+        MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_web_app_data),
+        group=-1,
+    )
+    app.add_handler(MessageHandler(_HasWebAppData(), handle_web_app_data), group=-1)
+
+    non_command_text = filters.TEXT & ~filters.COMMAND & ~filters.StatusUpdate.WEB_APP_DATA
+
     # Команды
     app.add_handler(CommandHandler("start", start_menu))
     app.add_handler(CommandHandler("help", help_command))
@@ -227,12 +289,11 @@ def _register_handlers(app: Application) -> None:
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Экспорт логов CSV$"), export_logs))
 
     # FSM-сообщения
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_state_message))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_state_user_message))
+    app.add_handler(MessageHandler(non_command_text, handle_state_message))
+    app.add_handler(MessageHandler(non_command_text, handle_state_user_message))
 
-    # Обработка фото/данных WebApp
+    # Обработка фото
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo_scan))
-    app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_web_app_data))
 
     # Неизвестные сообщения - в самом конце
     app.add_handler(MessageHandler(filters.ALL, unknown_message))
@@ -262,12 +323,6 @@ def _build_app() -> Application:
 def main() -> None:
     from telegram.error import NetworkError, TimedOut
 
-    logging.basicConfig(
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        level=logging.INFO,
-    )
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-
     app = _build_app()
 
     try:
@@ -284,4 +339,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    _setup_logging()
     main()

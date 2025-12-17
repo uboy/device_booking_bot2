@@ -16,6 +16,7 @@ from telegram import (
 )
 from telegram.ext import ContextTypes
 
+import logging
 import storage
 import utils
 from access_control import access_control, main_menu_keyboard
@@ -24,6 +25,11 @@ from states import BotState
 import json
 import base64
 import binascii
+import hashlib
+import hmac
+from urllib.parse import parse_qsl
+
+logger = logging.getLogger(__name__)
 
 # Импорт для OCR (опционально, если библиотека установлена)
 try:
@@ -55,6 +61,36 @@ def _get_state(context: ContextTypes.DEFAULT_TYPE) -> BotState:
 
 def _set_state(context: ContextTypes.DEFAULT_TYPE, state: BotState) -> None:
     context.user_data["state"] = state
+
+
+def _verify_webapp_init_data(init_data: str) -> bool:
+    """
+    Проверка подписи initData из Telegram WebApp.
+    Алгоритм: https://core.telegram.org/bots/webapps#validating-data-received-via-the-web-app
+    """
+    if not init_data:
+        return False
+
+    try:
+        params = dict(parse_qsl(init_data, keep_blank_values=True))
+    except Exception:
+        return False
+
+    tg_hash = params.pop("hash", None)
+    if not tg_hash:
+        return False
+
+    # Строка для проверки
+    data_check_list = [f"{k}={v}" for k, v in sorted(params.items())]
+    data_check_string = "\n".join(data_check_list)
+
+    bot_token = storage.config.get("bot_token")
+    if not bot_token:
+        return False
+
+    secret_key = hashlib.sha256(bot_token.encode()).digest()
+    calc_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(calc_hash, tg_hash)
 
 
 def _format_groups_list() -> str:
@@ -2524,6 +2560,9 @@ def _find_devices_by_code(code: str) -> List[Dict[str, Any]]:
 @access_control()
 async def scan_code_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Меню сканирования: QR / Фото / WebApp."""
+    # Если сюда по ошибке пришли данные WebApp – делегируем в целевой хендлер
+    if update.message and getattr(update.message, "web_app_data", None):
+        return await handle_web_app_data(update, context)
 
     user_id = update.effective_user.id
     context.user_data["scanning_mode"] = True
@@ -2641,7 +2680,7 @@ async def _recognize_text_from_photo(photo_bytes: bytes) -> Optional[str]:
             return None
             
     except Exception as e:
-        print(f"Ошибка OCR: {e}")
+        logger.exception("Ошибка OCR при распознавании текста")
         return None
 
 
@@ -2771,11 +2810,27 @@ async def _process_code_directly(
     devices = list(all_devices.values())
     
     if not devices:
-        await reply_target.reply_text(
-            f"❌ Устройство с кодом '{code}' не найдено в базе.\n\n"
-            "Проверьте правильность кода или обратитесь к администратору.",
-            reply_markup=main_menu_keyboard(update.effective_user.id),
-        )
+        kb = None
+        if utils.is_admin(update.effective_user.id):
+            kb = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton("➕ Добавить устройство", callback_data="add_device"),
+                        InlineKeyboardButton("◀️ Отмена", callback_data="back_to_main"),
+                    ]
+                ]
+            )
+            await reply_target.reply_text(
+                f"❌ Устройство с кодом '{code}' не найдено в базе.\n"
+                "Хотите добавить новое устройство с этим SN?",
+                reply_markup=kb,
+            )
+        else:
+            await reply_target.reply_text(
+                f"❌ Устройство с кодом '{code}' не найдено в базе.\n\n"
+                "Проверьте правильность кода или обратитесь к администратору.",
+                reply_markup=main_menu_keyboard(update.effective_user.id),
+            )
         return
     
     user_id = update.effective_user.id
@@ -3681,153 +3736,168 @@ async def select_device_type_callback(update: Update, context: ContextTypes.DEFA
         )
 
 
+
 async def handle_web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка данных от Web App (сканер)."""
-    print("=== handle_web_app_data вызван ===")
-    
+    logger.info("handle_web_app_data triggered")
+
+    if update.message and getattr(update.message, "web_app_data", None):
+        await update.message.reply_text("WEB_APP_DATA пойман ✅")
+        try:
+            await update.message.reply_text(update.message.web_app_data.data)
+        except Exception:
+            logger.debug("Не удалось отобразить web_app_data.data пользователю", exc_info=True)
+
     # Проверяем наличие web_app_data
     if not update.message:
-        print("Нет update.message")
+        logger.warning("handle_web_app_data: update.message is missing")
         return
-    
-    print(f"update.message type: {type(update.message)}")
-    print(f"update.message attributes: {dir(update.message)}")
-    
-    # В python-telegram-bot 20.x web_app_data может быть в разных местах
+
+    logger.debug("update.message type: %s", type(update.message))
+    logger.debug("update.message attributes: %s", dir(update.message))
+
     web_app_data = None
-    if hasattr(update.message, 'web_app_data') and update.message.web_app_data:
+    if hasattr(update.message, "web_app_data") and update.message.web_app_data:
         web_app_data = update.message.web_app_data
-        print(f"Найден web_app_data через web_app_data: {web_app_data}")
-    elif hasattr(update.message, 'data') and update.message.data:
-        # Альтернативный способ получения данных
-        web_app_data = type('obj', (object,), {'data': update.message.data})()
-        print(f"Найден web_app_data через data: {update.message.data}")
+        logger.debug("Найден web_app_data через web_app_data: %s", web_app_data)
+    elif hasattr(update.message, "data") and update.message.data:
+        web_app_data = type("obj", (object,), {"data": update.message.data})()
+        logger.debug("Найден web_app_data через data: %s", update.message.data)
     else:
-        print("web_app_data не найден. Проверяем все возможные атрибуты:")
+        logger.debug("web_app_data не найден. Проверяем все возможные атрибуты")
         for attr in dir(update.message):
-            if 'web' in attr.lower() or 'app' in attr.lower() or 'data' in attr.lower():
+            if "web" in attr.lower() or "app" in attr.lower() or "data" in attr.lower():
                 try:
                     value = getattr(update.message, attr, None)
-                    print(f"  {attr}: {value}")
-                except:
-                    pass
-    
+                    logger.debug("  %s: %s", attr, value)
+                except Exception:
+                    continue
+
     if not web_app_data:
-        print("web_app_data не найден, возвращаемся")
-        # Пробуем получить данные напрямую из update
-        if hasattr(update, 'web_app_data'):
-            print(f"Найден web_app_data в update: {update.web_app_data}")
+        logger.warning("handle_web_app_data: web_app_data не найден")
+        if hasattr(update, "web_app_data"):
+            logger.debug("Найден web_app_data в update: %s", update.web_app_data)
             web_app_data = update.web_app_data
         else:
-            print("web_app_data не найден нигде")
+            logger.error("web_app_data не найден нигде")
             return
-    
-    # Проверяем доступ пользователя
+    else:
+        await update.message.reply_text(
+            f"Получены данные WebApp (debug): {str(web_app_data)[:200]}",
+        )
+
     user_id = update.effective_user.id if update.effective_user else None
     if not user_id:
-        print("Нет user_id")
+        logger.warning("handle_web_app_data: нет user_id")
         return
-    
-    print(f"User ID: {user_id}")
-    
+
+    logger.info("handle_web_app_data для user_id=%s", user_id)
+
     db_user = utils.get_user_by_id(user_id)
     if not db_user or db_user.get("status") != "active":
-        print(f"Пользователь не активен: {db_user}")
+        logger.warning("handle_web_app_data: пользователь не активен: %s", db_user)
         await update.message.reply_text(
             "Вы не зарегистрированы или не активированы. Используйте /register для регистрации."
         )
         return
-    
+
     scanning_mode = context.user_data.get("scanning_mode", False)
-    print(f"scanning_mode: {scanning_mode}")
     if not scanning_mode:
-        print("scanning_mode = False, запрашиваем активацию")
-        await update.message.reply_text(
-            "Пожалуйста, сначала нажмите '📷 Сканирование' в главном меню."
-        )
-        return
-    
+        context.user_data["scanning_mode"] = True
+        scanning_mode = True
+    logger.debug("handle_web_app_data scanning_mode=%s", scanning_mode)
+
     try:
-        # Получаем данные от Web App
         data_str = web_app_data.data
-        print(f"Получены данные от Web App (строка): {data_str[:200]}...")
-        
+        logger.debug("Получены данные от Web App (строка, первые 200): %s", data_str[:200])
+
         data = json.loads(data_str)
-        print(f"Распарсенные данные: {data}")
-        
+        logger.debug("Распарсенные данные: %s", data)
+        await update.message.reply_text(
+            f"Debug: получены данные ({len(data_str)} байт) тип={data.get('type')}",
+        )
+
+        auth_info = data.get("auth") or {}
+        init_data_raw = auth_info.get("init_data") or ""
+        auth_user = auth_info.get("user") or {}
+        if init_data_raw:
+            verified = _verify_webapp_init_data(init_data_raw)
+            logger.info(
+                "WebApp auth: user=%s verified=%s",
+                auth_user if auth_user else "<none>",
+                verified,
+            )
+            if not verified:
+                await update.message.reply_text("⚠️ Не удалось подтвердить подпись WebApp данных.")
+        else:
+            logger.debug("WebApp auth: init_data отсутствует")
+
         data_type = data.get("type")
-        print(f"Тип данных: {data_type}")
-        
+        logger.debug("Тип данных: %s", data_type)
+
         if data_type == "code":
-            # Получен код от QR-сканера
             code = data.get("data", "").strip()
-            print(f"Извлеченный код: '{code}'")
-            
+            logger.info("Получен код от WebApp: %s", code)
+
             if code:
-                # Отправляем подтверждение получения
                 processing_msg = await update.message.reply_text(
                     f"✅ Получен код: `{code}`\n\n🔍 Ищу устройство...",
                     parse_mode="Markdown"
                 )
-                print(f"Отправлено подтверждение, вызываем _process_code_directly с кодом: '{code}'")
-                # Обрабатываем как обычный код напрямую
+                logger.debug("Вызываем _process_code_directly с кодом: %s", code)
                 await _process_code_directly(update, context, code, message_for_reply=processing_msg)
-                print("_process_code_directly завершен")
+                logger.debug("_process_code_directly завершен")
             else:
-                print("Код пустой")
+                logger.warning("Код пустой")
                 await update.message.reply_text("Код не распознан. Попробуйте еще раз.")
-        
+
         elif data_type == "photo":
-            # Получено фото от камеры
             photo_data = data.get("data", "")
             if not photo_data:
-                await update.message.reply_text("❌ Фото не получено. Попробуйте еще раз.")
+                await update.message.reply_text("⚠️ Фото не получено. Попробуйте еще раз.")
                 return
-            
-            # Удаляем префикс data:image/jpeg;base64, если есть
+
             if "," in photo_data:
                 photo_data = photo_data.split(",")[1]
-            
-            # Проверяем размер данных
+
             data_size = len(photo_data)
-            estimated_size = int(data_size * 3 / 4)  # Примерный размер в байтах
-            print(f"Получено фото от Web App: размер base64={data_size}, примерный размер={estimated_size} байт")
-            
-            if estimated_size > 100000:  # Больше 100KB
+            estimated_size = int(data_size * 3 / 4)
+            logger.info(
+                "Получено фото от WebApp: base64_len=%s, estimated_bytes=%s",
+                data_size,
+                estimated_size,
+            )
+
+            if estimated_size > 100000:
                 await update.message.reply_text(
-                    "❌ Изображение слишком большое. Попробуйте сфотографировать ближе к тексту или используйте ручной ввод."
+                    "⚠️ Изображение слишком большое. Попробуйте сфотографировать ближе к тексту или используйте ручной ввод."
                 )
                 return
-            
+
             try:
-                # Декодируем base64
                 photo_bytes = base64.b64decode(photo_data, validate=True)
-                print(f"Фото декодировано: размер={len(photo_bytes)} байт")
-                
-                # Обрабатываем фото
-                processing_msg = await update.message.reply_text("🔍 Обработка фото... Пожалуйста, подождите.")
-                
-                # Пытаемся распознать текст с помощью OCR
+                logger.info("Фото декодировано: %s байт", len(photo_bytes))
+
+                processing_msg = await update.message.reply_text("🛠️ Обработка фото... Пожалуйста, подождите.")
+
                 recognized_text = await _recognize_text_from_photo(photo_bytes)
-                
+
                 if recognized_text:
-                    print(f"OCR распознал текст: {recognized_text[:100]}...")
-                    # Ищем серийный номер в распознанном тексте
+                    logger.info("OCR распознал текст: %s", recognized_text[:100])
                     serial_number = _extract_serial_number(recognized_text)
-                    
+
                     if serial_number:
                         await processing_msg.edit_text(
                             f"✅ Распознан серийный номер: **{serial_number}**\n\n"
                             f"Распознанный текст: `{recognized_text[:100]}...`",
                             parse_mode="Markdown"
                         )
-                        
-                        # Обрабатываем найденный серийный номер как код напрямую
+
                         await _process_code_directly(update, context, serial_number, message_for_reply=processing_msg)
                         return
                     else:
                         await processing_msg.edit_text(
-                            f"⚠️ Текст распознан, но серийный номер не найден.\n\n"
+                            f"ℹ️ Текст распознан, но серийный номер не найден.\n\n"
                             f"Распознанный текст: `{recognized_text[:200]}`\n\n"
                             f"Пожалуйста, введите серийный номер вручную.",
                             parse_mode="Markdown"
@@ -3841,43 +3911,37 @@ async def handle_web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE
                         parse_mode="Markdown"
                     )
                     return
-                    
-            except binascii.Error as e:
-                print(f"Ошибка декодирования base64: {e}")
+
+            except binascii.Error:
+                logger.exception("Ошибка декодирования base64")
                 await update.message.reply_text(
-                    "❌ Ошибка: неверный формат изображения. Попробуйте еще раз."
+                    "⚠️ Ошибка: неверный формат изображения. Попробуйте еще раз."
                 )
                 return
-            except Exception as e:
-                print(f"Ошибка при обработке фото: {e}")
+            except Exception:
+                logger.exception("Ошибка при обработке фото")
                 await update.message.reply_text(
-                    f"❌ Ошибка при обработке фото: {str(e)}\n\n"
-                    "Пожалуйста, введите серийный номер вручную."
+                    "⚠️ Ошибка при обработке фото. Пожалуйста, введите серийный номер вручную."
                 )
         else:
-            print(f"Неизвестный тип данных: {data_type}")
-            await update.message.reply_text(f"❌ Неизвестный тип данных: {data_type}")
-            
-    except json.JSONDecodeError as e:
-        print(f"Ошибка JSON декодирования: {e}")
-        print(f"Данные, которые не удалось распарсить: {data_str[:500] if 'data_str' in locals() else 'N/A'}")
-        await update.message.reply_text(
-            f"❌ Ошибка при обработке данных от Web App (неверный формат JSON).\n\n"
-            f"Попробуйте еще раз или используйте другой способ сканирования."
-        )
-    except Exception as e:
-        print(f"Общая ошибка в handle_web_app_data: {e}")
-        import traceback
-        traceback.print_exc()
-        await update.message.reply_text(
-            f"❌ Ошибка при обработке данных: {str(e)}\n\n"
-            f"Попробуйте еще раз или используйте другой способ сканирования."
-        )
+            logger.warning("Неизвестный тип данных: %s", data_type)
+            await update.message.reply_text(f"❓ Неизвестный тип данных: {data_type}")
 
-
-# ==========
-# Управление группами
-# ==========
+    except json.JSONDecodeError:
+        logger.exception("Ошибка JSON декодирования")
+        logger.debug(
+            "Данные, которые не удалось распарсить: %s",
+            data_str[:500] if "data_str" in locals() else "N/A",
+        )
+        await update.message.reply_text(
+            "⚠️ Ошибка при обработке данных от Web App (неверный формат JSON).\n\n"
+            "Попробуйте еще раз или используйте другой способ сканирования."
+        )
+    except Exception:
+        logger.exception("Общая ошибка в handle_web_app_data")
+        await update.message.reply_text(
+            "⚠️ Ошибка при обработке данных. Попробуйте еще раз или используйте другой способ сканирования."
+        )
 
 @access_control(required_role="Admin")
 async def manage_groups_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):

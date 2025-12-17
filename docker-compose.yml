@@ -5,6 +5,7 @@ services:
     container_name: device-booking-bot
     environment:
       - DATA_DIR=/app/data
+      - LOG_LEVEL=DEBUG
     volumes:
       - ./data:/app/data
     command: ["python", "main.py"]
