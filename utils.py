@@ -142,7 +142,7 @@ def filter_devices_by_user_group(user_id: int, devices: List[Dict[str, Any]]) ->
     """Отфильтровать устройства по группе пользователя.
     
     Администраторы видят все устройства.
-    Обычные пользователи видят только устройства из своей группы.
+    Обычные пользователи видят устройства своей группы, а также устройства без группы.
     """
     # Администраторы видят все устройства
     if is_admin(user_id):
@@ -150,13 +150,13 @@ def filter_devices_by_user_group(user_id: int, devices: List[Dict[str, Any]]) ->
     
     user_group = get_user_group(user_id)
     
-    # Если пользователь не в группе - не видит устройств
+    # Если пользователь не в группе - видит только устройства без группы
     if not user_group:
-        return []
+        return [d for d in devices if not d.get("group_id")]
     
     # Фильтруем устройства по группе
     user_group_id = user_group.get("id")
-    return [d for d in devices if d.get("group_id") == user_group_id]
+    return [d for d in devices if not d.get("group_id") or d.get("group_id") == user_group_id]
 
 
 def get_default_group() -> Optional[Dict[str, Any]]:

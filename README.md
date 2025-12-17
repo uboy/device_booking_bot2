@@ -130,7 +130,7 @@ The first time you use OCR, it will download language models (this may take a fe
 
 2. **Managing Devices**:
    - Navigate to "Manage Devices" in the admin panel.
-   - Add new devices or import from a CSV/XLSX file (format: `SN, Name, Type`).
+   - Add new devices or import from a CSV/XLSX file (format: `SN, Name, Type[, GroupId]`; `GroupId` optional).
    - Edit or delete existing devices.
    - View booking history for each device.
 

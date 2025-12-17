@@ -305,6 +305,7 @@ async def search_devices(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Фильтруем устройства по группе пользователя
     user_id = update.effective_user.id
+    is_admin = utils.is_admin(user_id)
     devices = utils.filter_devices_by_user_group(user_id, all_devices)
     
     if not devices:
@@ -369,7 +370,6 @@ async def list_devices(update: Update, context: ContextTypes.DEFAULT_TYPE):
     utils.cleanup_expired_bookings()
     user_id = update.effective_user.id
     is_admin = utils.is_admin(user_id)
-    is_admin = utils.is_admin(user_id)
     
     # Фильтруем устройства по группе пользователя
     available_devices = utils.filter_devices_by_user_group(user_id, storage.devices)
@@ -426,6 +426,7 @@ async def select_device_type(update: Update, context: ContextTypes.DEFAULT_TYPE)
     utils.cleanup_expired_bookings()
     text = update.message.text.strip()
     user_id = update.effective_user.id
+    is_admin = utils.is_admin(user_id)
     
     # Убираем эмодзи и количество, если есть
     dev_type = re.sub(r'^📦\s*', '', text)
@@ -1255,16 +1256,33 @@ async def handle_state_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 context.user_data.pop("edit_device_id", None)
                 return
             
-            try:
-                name, sn, dev_type = map(str.strip, text.split(","))
-            except ValueError:
-                await update.message.reply_text("Неверный формат. Используйте: Название, SN, Тип")
+            parts = [p.strip() for p in text.split(",")]
+            if len(parts) not in (3, 4):
+                await update.message.reply_text("Неверный формат. Используйте: Название, SN, Тип [, GroupID]")
                 return
+            name, sn, dev_type = parts[0], parts[1], parts[2]
+            group_id = device.get("group_id")
+            if len(parts) == 4:
+                group_part = parts[3]
+                if group_part == "":
+                    group_id = None
+                else:
+                    try:
+                        group_id_int = int(group_part)
+                        if utils.get_group_by_id(group_id_int):
+                            group_id = group_id_int
+                        else:
+                            await update.message.reply_text("Группа с таким ID не найдена. Укажите существующий ID или оставьте поле пустым.")
+                            return
+                    except ValueError:
+                        await update.message.reply_text("ID группы должно быть числом. Попробуйте снова.")
+                        return
             
             old_type = device.get("type", "Неизвестно")
             device["name"] = name
             device["sn"] = sn
             device["type"] = dev_type
+            device["group_id"] = group_id
             storage.save_devices()
             
             _set_state(context, BotState.NONE)
@@ -1275,12 +1293,17 @@ async def handle_state_message(update: Update, context: ContextTypes.DEFAULT_TYP
             return_type = dev_type
             
             # Отправляем сообщение об успехе
+            group_name = "Не назначена"
+            if group_id:
+                group = utils.get_group_by_id(group_id)
+                group_name = group.get("name", f"ID: {group_id}") if group else f"ID: {group_id}"
             await update.message.reply_text(
                 f"✅ Устройство обновлено:\n"
                 f"🆔 ID: {edit_device_id}\n"
                 f"📱 Название: {name}\n"
                 f"🔢 SN: {sn}\n"
-                f"📦 Тип: {dev_type}"
+                f"📦 Тип: {dev_type}\n"
+                f"👥 Группа: {group_name}"
             )
             
             # Показываем список устройств того же типа
@@ -1302,6 +1325,7 @@ async def handle_state_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 "sn": sn,
                 "type": dev_type,
                 "status": "free",
+                "group_id": None,
             }
         )
         storage.save_devices()
@@ -1382,11 +1406,15 @@ async def import_devices_csv(update: Update, context: ContextTypes.DEFAULT_TYPE)
     """Запрос на импорт устройств (CSV/XLSX). Работает из сообщения и из callback."""
     query = update.callback_query
     msg = query.message if query else update.message
+    if msg is None:
+        msg = await context.bot.send_message(chat_id=update.effective_chat.id, text="Импорт устройств")
     if query:
         await query.answer()
     await msg.reply_text("Отправьте CSV или XLSX с колонками: SN, Name, Type.")
     context.user_data["awaiting_devices_csv"] = True
-    await update.message.reply_text("Можно загрузить CSV или XLSX.")
+    # только если исходное сообщение есть
+    if update.message:
+        await update.message.reply_text("Можно загрузить CSV или XLSX.")
 
 
 @access_control(required_role="Admin")
@@ -1409,6 +1437,16 @@ async def process_devices_csv(update: Update, context: ContextTypes.DEFAULT_TYPE
         for row in rows:
             if not row["SN"] and not row["Name"]:
                 continue
+            group_id_raw = row.get("GroupId", "").strip()
+            group_id = None
+            if group_id_raw:
+                try:
+                    group_id_int = int(group_id_raw)
+                    # проверим, есть ли группа
+                    if utils.get_group_by_id(group_id_int):
+                        group_id = group_id_int
+                except ValueError:
+                    pass
             max_id += 1
             storage.devices.append(
                 {
@@ -1417,6 +1455,7 @@ async def process_devices_csv(update: Update, context: ContextTypes.DEFAULT_TYPE
                     "sn": row["SN"],
                     "type": row["Type"],
                     "status": "free",
+                    "group_id": group_id,
                 }
             )
             added += 1
@@ -2014,6 +2053,12 @@ async def edit_device_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     if not device:
         await query.edit_message_text("Устройство не найдено.")
         return
+
+    group_id = device.get("group_id")
+    group_name = "Не назначена"
+    if group_id:
+        group = utils.get_group_by_id(group_id)
+        group_name = f"{group.get('name', 'Без названия')} (ID: {group_id})" if group else f"ID: {group_id}"
     
     # Показываем текущие данные и предлагаем изменить
     device_info = (
@@ -2022,10 +2067,13 @@ async def edit_device_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         f"🆔 ID: {device_id}\n"
         f"📱 Название: {device.get('name')}\n"
         f"🔢 SN: {device.get('sn')}\n"
-        f"📦 Тип: {device.get('type')}\n\n"
+        f"📦 Тип: {device.get('type')}\n"
+        f"👥 Группа: {group_name}\n\n"
         f"Введите новые данные в формате:\n"
-        f"Название, SN, Тип\n"
-        f"Пример:\niPhone 12, SN-123456, Phone"
+        f"Название, SN, Тип, GroupID (опционально)\n"
+        f"Примеры:\n"
+        f"iPhone 12, SN-123456, Phone, 2\n"
+        f"iPhone 12, SN-123456, Phone  (если оставить группу без изменений)"
     )
     
     context.user_data["edit_device_id"] = device_id
@@ -3413,6 +3461,7 @@ async def select_device_type_callback(update: Update, context: ContextTypes.DEFA
     dev_type = query.data[5:]  # Убираем префикс "type_"
     utils.cleanup_expired_bookings()
     user_id = update.effective_user.id
+    is_admin = utils.is_admin(user_id)
     
     # Получаем все устройства этого типа и фильтруем по группе пользователя
     all_devices = [d for d in storage.devices if d.get("type") == dev_type]
