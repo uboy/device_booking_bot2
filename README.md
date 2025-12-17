@@ -96,12 +96,24 @@ The first time you use OCR, it will download language models (this may take a fe
    Данные и логи будут храниться в `./data` (переменная `DATA_DIR=/app/data` прокинута в контейнер).
 
 **WebApp сканер (отдельный сервер)**
-1. Соберите и запустите статический сервер:
+1. Настройте домен и откройте порты 80/443 на хосте. Создайте `.env` рядом с `docker-compose.webapp.yml`:
+   ```
+   DOMAIN=your.domain.example
+   LE_EMAIL=you@example.com
+   ```
+2. Соберите и запустите webapp:
    ```bash
    docker-compose -f docker-compose.webapp.yml up -d --build
    ```
-2. Опубликуйте его за HTTPS (например, через обратный прокси) и укажите полный URL в `config.json` (`webapp_url`).
-3. Файл доступен по пути `/webapp_scanner.html` (также задан как `index.html`).
+   Сертификаты, ключи и логи лежат на хосте в `./certbot/` (монтируются в контейнер).
+3. Получить/обновить сертификат (порт 80 должен быть доступен наружу):
+   ```bash
+   docker-compose -f docker-compose.webapp.yml run --rm certbot
+   docker-compose -f docker-compose.webapp.yml restart webapp_scanner
+   ```
+   Nginx автоматически переключится на HTTPS, когда появятся файлы в `/etc/letsencrypt/live/$DOMAIN`.
+4. Укажите полный HTTPS-URL в `config.json` → `webapp_url`.
+5. WebApp доступен по `/webapp_scanner.html` (а также как `index.html`).
 
 ## **How to Use**
 

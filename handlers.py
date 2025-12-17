@@ -290,11 +290,10 @@ async def register_group_select_callback(update: Update, context: ContextTypes.D
     _set_state(context, BotState.NONE)
     context.user_data.pop("pending_registration", None)
 
-        await query.edit_message_text(
-            f"✅ Заявка отправлена.\nГруппа: {group.get('name', 'Без названия')}.\n"
-            "Как только администратор подтвердит регистрацию, вы получите доступ к устройствам."
-        )
-    await _notify_admins_about_registration(context, storage.users[-1])
+    await query.edit_message_text(
+        f"✅ Заявка отправлена.\nГруппа: {group.get('name', 'Без названия')}.\n"
+        "Как только администратор подтвердит регистрацию, вы получите доступ к устройствам."
+    )
 
 
 @access_control(required_role="Admin")
@@ -1550,24 +1549,25 @@ async def manage_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if pending:
         lines = []
         inline_buttons = []
-    for u in pending:
-        user_info = (
+        for u in pending:
+            user_info = (
                 f"👤 **{u.get('first_name', '')} {u.get('last_name', '')}**\n"
                 f"🆔 ID: {u['user_id']} | @{u.get('username', 'N/A')}\n"
             )
-        phone = u.get("phone", "")
-        if phone:
-            user_info += f"📱 Телефон: {phone}\n"
-        group = utils.get_group_by_id(u.get("group_id"))
-        if group:
-            user_info += f"👥 Группа: {group.get('name', 'Без названия')} (ID: {group.get('id')})\n"
-        else:
-            user_info += "👥 Группа: не назначена\n"
-        lines.append(user_info)
+            phone = u.get("phone", "")
+            if phone:
+                user_info += f"📱 Телефон: {phone}\n"
+            group = utils.get_group_by_id(u.get("group_id"))
+            if group:
+                user_info += f"👥 Группа: {group.get('name', 'Без названия')} (ID: {group.get('id')})\n"
+            else:
+                user_info += "👥 Группа: не назначена\n"
+            lines.append(user_info)
             
             inline_buttons.append([
                 InlineKeyboardButton(f"✅ Утвердить {u['user_id']}", callback_data=f"approve_user_{u['user_id']}"),
-                InlineKeyboardButton(f"❌ Отклонить {u['user_id']}", callback_data=f"reject_user_{u['user_id']}")
+                InlineKeyboardButton(f"❌ Отклонить {u['user_id']}", callback_data=f"reject_user_{u['user_id']}"),
+                InlineKeyboardButton(f"🚫 Блокировать", callback_data=f"block_user_{u['user_id']}")
             ])
         
         text = "⏳ **Ожидающие заявки**\n\n" + "\n".join(lines)

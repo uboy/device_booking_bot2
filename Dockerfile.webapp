@@ -2,10 +2,20 @@ FROM nginx:alpine
 
 WORKDIR /usr/share/nginx/html
 
+RUN apk add --no-cache gettext
+
 # Копируем сканер и ассеты
 COPY webapp_scanner.html ./webapp_scanner.html
 COPY webapp_scanner.html ./index.html
 COPY style.css ./style.css
 COPY app.js ./app.js
 
-EXPOSE 80
+# Nginx конфиг и entrypoint
+COPY docker/webapp/nginx-http.conf.template /etc/nginx/conf.d/webapp-http.conf.template
+COPY docker/webapp/nginx-https.conf.template /etc/nginx/conf.d/webapp-https.conf.template
+COPY docker/webapp/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+EXPOSE 80 443
+
+ENTRYPOINT ["/entrypoint.sh"]

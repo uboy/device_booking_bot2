@@ -7,4 +7,25 @@ services:
     container_name: device-booking-webapp
     ports:
       - "8080:80"
+      - "8443:443"
+    environment:
+      - DOMAIN=${DOMAIN}
+    volumes:
+      - ./certbot/etc:/etc/letsencrypt
+      - ./certbot/var:/var/lib/letsencrypt
+      - ./certbot/www:/var/www/certbot
+      - ./certbot/logs:/var/log/letsencrypt
     restart: unless-stopped
+
+  certbot:
+    image: certbot/certbot
+    container_name: device-booking-certbot
+    depends_on:
+      - webapp_scanner
+    volumes:
+      - ./certbot/etc:/etc/letsencrypt
+      - ./certbot/var:/var/lib/letsencrypt
+      - ./certbot/www:/var/www/certbot
+      - ./certbot/logs:/var/log/letsencrypt
+    entrypoint: /bin/sh
+    command: -c "certbot certonly --webroot -w /var/www/certbot -d ${DOMAIN} --email ${LE_EMAIL} --agree-tos --non-interactive --keep-until-expiring"
