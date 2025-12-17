@@ -217,6 +217,17 @@ def _build_app() -> Application:
     token = storage.config.get("bot_token")
     if not token or token == "PUT_YOUR_TOKEN_HERE":
         raise RuntimeError("Bot token is not configured in config.json")
+    logging.info(
+        "Config loaded: admins=%s, device_types=%s, registration_enabled=%s, default_booking_period_days=%s, "
+        "max_devices_per_user=%s, notify_before_minutes=%s, webapp_url=%s",
+        storage.config.get("admin_ids"),
+        storage.config.get("device_types"),
+        storage.config.get("registration_enabled"),
+        storage.config.get("default_booking_period_days"),
+        storage.config.get("max_devices_per_user"),
+        storage.config.get("notify_before_minutes"),
+        storage.config.get("webapp_url"),
+    )
     app = Application.builder().token(token).build()
     _register_handlers(app)
     return app

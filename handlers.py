@@ -80,26 +80,45 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-@access_control()
+@access_control(required_status=None, allow_unregistered=True)
 async def go_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    is_admin = utils.is_admin(user_id)
+    db_user = utils.get_user_by_id(user_id)
     _set_state(context, BotState.NONE)
     context.user_data.pop("scanning_mode", None)  # Выход из режима сканирования
     context.user_data.pop("pending_registration", None)
+    if not db_user:
+        await update.message.reply_text(
+            f"Ваш Telegram ID: `{user_id}`\n"
+            "Вы не зарегистрированы. Используйте /register для отправки заявки или /help для справки.",
+            parse_mode="Markdown",
+            reply_markup=ReplyKeyboardMarkup([["/register", "/help"]], resize_keyboard=True),
+        )
+        return
     await update.message.reply_text("Главное меню:", reply_markup=main_menu_keyboard(user_id))
 
 
-@access_control()
+@access_control(required_status=None, allow_unregistered=True)
 async def start_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    db_user = utils.get_user_by_id(user_id)
     _set_state(context, BotState.NONE)
     context.user_data.pop("pending_registration", None)
 
+    if not db_user:
+        await update.message.reply_text(
+            f"Ваш Telegram ID: `{user_id}`\n"
+            "Вы не зарегистрированы. Используйте /register для отправки заявки или /help для справки.",
+            parse_mode="Markdown",
+            reply_markup=ReplyKeyboardMarkup([["/register", "/help"]], resize_keyboard=True),
+        )
+        return
+
     await update.message.reply_text(
-        "Главное меню:\n\n"
+        f"Главное меню (ваш ID: `{user_id}`):\n\n"
         "💡 Вы также можете ввести текст для поиска устройств\n"
         "(модель, название, тип, серийный номер)",
+        parse_mode="Markdown",
         reply_markup=main_menu_keyboard(user_id)
     )
 

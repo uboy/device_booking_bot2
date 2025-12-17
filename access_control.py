@@ -19,7 +19,7 @@ def _main_menu_keyboard(user_id: int) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 
-def access_control(required_status: str = "active", required_role: Optional[str] = None):
+def access_control(required_status: str = "active", required_role: Optional[str] = None, allow_unregistered: bool = False):
     """
     Декоратор для проверки:
     - есть ли пользователь в users.json,
@@ -41,12 +41,28 @@ def access_control(required_status: str = "active", required_role: Optional[str]
 
             db_user = utils.get_user_by_id(user_id)
 
+            # Авто-регистрация админа по списку admin_ids из config.json
+            if not db_user and user_id in storage.config.get("admin_ids", []):
+                db_user = {
+                    "user_id": user_id,
+                    "username": user.username if user else "unknown",
+                    "first_name": user.first_name if user else "",
+                    "last_name": user.last_name if user else "",
+                    "role": "Admin",
+                    "status": "active",
+                }
+                storage.users.append(db_user)
+                storage.save_users()
+
             if not db_user:
-                await msg.reply_text(
-                    "Вы не зарегистрированы. Используйте /register для отправки заявки.",
-                    reply_markup=ReplyKeyboardMarkup([["/help"]], resize_keyboard=True),
-                )
-                return
+                if not allow_unregistered:
+                    await msg.reply_text(
+                        "Вы не зарегистрированы. Используйте /register для отправки заявки.",
+                        reply_markup=ReplyKeyboardMarkup([["/help"]], resize_keyboard=True),
+                    )
+                    return
+                else:
+                    return await func(update, context, *args, **kwargs)
 
             status = db_user.get("status")
             if required_status and status != required_status:
