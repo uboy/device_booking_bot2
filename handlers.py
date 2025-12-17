@@ -178,7 +178,7 @@ async def register_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-@access_control()
+@access_control(required_status=None, allow_unregistered=True)
 async def register_group_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обрабатывает выбор группы пользователем при регистрации."""
     query = update.callback_query
@@ -244,11 +244,20 @@ async def register_group_select_callback(update: Update, context: ContextTypes.D
 
 @access_control(required_role="Admin")
 async def toggle_registration(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Переключает режим регистрации. Работает и из сообщений, и из callback."""
+    query = update.callback_query
+    msg = query.message if query else update.message
+
     storage.config["registration_enabled"] = not storage.config.get("registration_enabled", False)
     storage.save_config()
-    await update.message.reply_text(
-        "Регистрация сейчас: " + ("включена" if storage.config["registration_enabled"] else "выключена")
-    )
+    state_text = "включена" if storage.config["registration_enabled"] else "выключена"
+
+    if query:
+        await query.answer(f"Регистрация {state_text}")
+        # не затираем меню, отправляем отдельным сообщением
+        await msg.reply_text(f"Регистрация сейчас: {state_text}")
+    else:
+        await msg.reply_text(f"Регистрация сейчас: {state_text}")
 
 
 # ==========
@@ -359,6 +368,7 @@ async def list_devices(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает типы устройств для выбора (фильтрованные по группе пользователя)."""
     utils.cleanup_expired_bookings()
     user_id = update.effective_user.id
+    is_admin = utils.is_admin(user_id)
     is_admin = utils.is_admin(user_id)
     
     # Фильтруем устройства по группе пользователя
@@ -734,6 +744,17 @@ async def release_all_user_devices(update: Update, context: ContextTypes.DEFAULT
 @access_control(required_role="Admin")
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    query = update.callback_query
+    if query:
+        await query.answer()
+        msg = query.message
+    else:
+        msg = update.message
+    if msg is None:
+        # fallback для случаев, когда message отсутствует (например, callback без message)
+        await context.bot.send_message(chat_id=user_id, text="⚙️ Открываю меню администратора...")
+        # получаем объект сообщения для дальнейших ответов
+        msg = await context.bot.send_message(chat_id=user_id, text=" ")
     
     # Используем inline кнопки для лучшего UX
     inline_kb = InlineKeyboardMarkup([
@@ -746,6 +767,11 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("📥 Экспорт пользователей", callback_data="export_users_admin")
         ],
         [InlineKeyboardButton("📥 Экспорт логов", callback_data="export_logs_admin")],
+        [InlineKeyboardButton(
+            f"🔄 Регистрация: {'Вкл' if storage.config.get('registration_enabled') else 'Выкл'}",
+            callback_data="toggle_registration"
+        )],
+        [InlineKeyboardButton("📥 Импорт устройств", callback_data="import_devices_admin")],
     ])
     
     # Также оставляем текстовые кнопки для совместимости
@@ -755,16 +781,18 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ["Просмотр забронированных устройств"],
         ["Экспорт устройств CSV", "Экспорт пользователей CSV"],
         ["Экспорт логов CSV"],
+        ["Включить регистрацию", "Выключить регистрацию"],
+        ["Импортировать устройства"],
         ["Назад"],
     ]
     
-    await update.message.reply_text(
+    await msg.reply_text(
         "👑 **Меню администратора**",
         parse_mode="Markdown",
         reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True),
     )
     
-    await update.message.reply_text(
+    await msg.reply_text(
         "Или используйте кнопки:",
         reply_markup=inline_kb,
     )
@@ -782,7 +810,10 @@ async def manage_devices_callback(update: Update, context: ContextTypes.DEFAULT_
     utils.cleanup_expired_bookings()
     
     if not storage.devices:
-        kb = [[InlineKeyboardButton("➕ Добавить устройство", callback_data="add_device")]]
+        kb = [
+            [InlineKeyboardButton("➕ Добавить устройство", callback_data="add_device")],
+            [InlineKeyboardButton("📥 Импорт устройств", callback_data="import_devices_admin")],
+        ]
         if query:
             await query.edit_message_text(
                 "📋 Пока нет устройств.",
@@ -815,6 +846,7 @@ async def manage_devices_callback(update: Update, context: ContextTypes.DEFAULT_
     
     text = f"📋 **Все устройства** ({len(storage.devices)} шт.)\n\n" + "\n\n".join(lines)
     inline_buttons.append([InlineKeyboardButton("➕ Добавить устройство", callback_data="add_device")])
+    inline_buttons.append([InlineKeyboardButton("📥 Импорт устройств", callback_data="import_devices_admin")])
     
     if query:
         await query.edit_message_text(
@@ -839,7 +871,10 @@ async def manage_devices_admin_callback(update: Update, context: ContextTypes.DE
     utils.cleanup_expired_bookings()
     
     if not storage.devices:
-        kb = [[InlineKeyboardButton("➕ Добавить устройство", callback_data="add_device")]]
+        kb = [
+            [InlineKeyboardButton("➕ Добавить устройство", callback_data="add_device")],
+            [InlineKeyboardButton("📥 Импорт устройств", callback_data="import_devices_admin")],
+        ]
         if query:
             await query.edit_message_text(
                 "📋 Пока нет устройств.",
@@ -878,6 +913,7 @@ async def manage_devices_admin_callback(update: Update, context: ContextTypes.DE
             callback_data="admin_all_devices"
         )
     ])
+    inline_buttons.append([InlineKeyboardButton("📥 Импорт устройств", callback_data="import_devices_admin")])
     
     # Кнопка добавления устройства
     inline_buttons.append([
@@ -1343,8 +1379,14 @@ async def handle_state_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
 @access_control(required_role="Admin")
 async def import_devices_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Отправьте CSV или XLSX с колонками: SN, Name, Type.")
+    """Запрос на импорт устройств (CSV/XLSX). Работает из сообщения и из callback."""
+    query = update.callback_query
+    msg = query.message if query else update.message
+    if query:
+        await query.answer()
+    await msg.reply_text("Отправьте CSV или XLSX с колонками: SN, Name, Type.")
     context.user_data["awaiting_devices_csv"] = True
+    await update.message.reply_text("Можно загрузить CSV или XLSX.")
 
 
 @access_control(required_role="Admin")
