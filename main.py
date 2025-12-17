@@ -198,6 +198,16 @@ def _register_handlers(app: Application) -> None:
         )
     )
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Импортировать устройства$"), import_devices_csv))
+    # Админ reply-кнопки
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Админ: Управление устройствами$"), manage_devices_admin_callback))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Админ: Управление пользователями$"), manage_users_admin_callback))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Админ: Управление группами$"), manage_groups_admin))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Админ: Просмотр забронированных$"), view_booked_admin_callback))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Админ: Импорт устройств$"), import_devices_csv))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Админ: Экспорт устройств$"), export_devices_callback))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Админ: Экспорт пользователей$"), export_users_callback))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Админ: Экспорт логов$"), export_logs_callback))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Админ: Переключить регистрацию$"), toggle_registration))
 
     # Управление пользователями
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Управление пользователями$"), manage_users))
@@ -256,6 +266,7 @@ def main() -> None:
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         level=logging.INFO,
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
     app = _build_app()
 

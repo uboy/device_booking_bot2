@@ -808,50 +808,20 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         msg = update.message
     if msg is None:
-        # fallback для случаев, когда message отсутствует (например, callback без message)
-        await context.bot.send_message(chat_id=user_id, text="⚙️ Открываю меню администратора...")
-        # получаем объект сообщения для дальнейших ответов
-        msg = await context.bot.send_message(chat_id=user_id, text=" ")
-    
-    # Используем inline кнопки для лучшего UX
-    inline_kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📋 Управление устройствами", callback_data="manage_devices_admin")],
-        [InlineKeyboardButton("👥 Управление пользователями", callback_data="manage_users_admin")],
-        [InlineKeyboardButton("👥 Управление группами", callback_data="manage_groups_admin")],
-        [InlineKeyboardButton("🔒 Забронированные устройства", callback_data="view_booked_admin")],
-        [
-            InlineKeyboardButton("📥 Экспорт устройств", callback_data="export_devices_admin"),
-            InlineKeyboardButton("📥 Экспорт пользователей", callback_data="export_users_admin")
-        ],
-        [InlineKeyboardButton("📥 Экспорт логов", callback_data="export_logs_admin")],
-        [InlineKeyboardButton(
-            f"🔄 Регистрация: {'Вкл' if storage.config.get('registration_enabled') else 'Выкл'}",
-            callback_data="toggle_registration"
-        )],
-        [InlineKeyboardButton("📥 Импорт устройств", callback_data="import_devices_admin")],
-    ])
-    
-    # Также оставляем текстовые кнопки для совместимости
+        msg = await context.bot.send_message(chat_id=user_id, text="⚙️ Открываю меню администратора...")
+
     kb = [
-        ["Управление устройствами", "Управление пользователями"],
-        ["Управление группами"],
-        ["Просмотр забронированных устройств"],
-        ["Экспорт устройств CSV", "Экспорт пользователей CSV"],
-        ["Экспорт логов CSV"],
-        ["Включить регистрацию", "Выключить регистрацию"],
-        ["Импортировать устройства"],
-        ["Назад"],
+        ["Админ: Управление устройствами", "Админ: Управление пользователями"],
+        ["Админ: Управление группами", "Админ: Просмотр забронированных"],
+        ["Админ: Импорт устройств", "Админ: Экспорт устройств"],
+        ["Админ: Экспорт пользователей", "Админ: Экспорт логов"],
+        ["Админ: Переключить регистрацию", "Главное меню"],
     ]
-    
+
     await msg.reply_text(
-        "👑 **Меню администратора**",
+        "👑 **Меню администратора**\nВыберите действие кнопками ниже.",
         parse_mode="Markdown",
         reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True),
-    )
-    
-    await msg.reply_text(
-        "Или используйте кнопки:",
-        reply_markup=inline_kb,
     )
 
 
@@ -1009,19 +979,24 @@ async def manage_devices_admin_callback(update: Update, context: ContextTypes.DE
 async def manage_users_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Callback для управления пользователями."""
     query = update.callback_query
-    await query.answer()
+    if query:
+        await query.answer()
     await manage_users_callback(update, context)
 
 
 async def view_booked_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Callback для просмотра забронированных устройств."""
     query = update.callback_query
-    await query.answer()
+    if query:
+        await query.answer()
     
     utils.cleanup_expired_bookings()
     booked = [d for d in storage.devices if d.get("status") == "booked"]
     if not booked:
-        await query.edit_message_text("Нет забронированных устройств.")
+        if query:
+            await query.edit_message_text("Нет забронированных устройств.")
+        else:
+            await update.message.reply_text("Нет забронированных устройств.")
         return
 
     # Формируем список с кнопками
@@ -1049,11 +1024,18 @@ async def view_booked_admin_callback(update: Update, context: ContextTypes.DEFAU
     inline_buttons.append([InlineKeyboardButton("🔓 Освободить все", callback_data="adm_rel_all")])
     inline_buttons.append([InlineKeyboardButton("◀️ Назад", callback_data="back_to_admin")])
     
-    await query.edit_message_text(
-        text,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(inline_buttons),
-    )
+    if query:
+        await query.edit_message_text(
+            text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(inline_buttons),
+        )
+    else:
+        await update.message.reply_text(
+            text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(inline_buttons),
+        )
 
 
 @access_control(required_role="Admin")
