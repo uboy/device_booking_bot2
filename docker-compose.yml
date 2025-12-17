@@ -1,0 +1,11 @@
+services:
+  bot:
+    build: .
+    image: device-booking-bot
+    container_name: device-booking-bot
+    environment:
+      - DATA_DIR=/app/data
+    volumes:
+      - ./data:/app/data
+    command: ["python", "main.py"]
+    restart: unless-stopped

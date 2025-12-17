@@ -1,0 +1,10 @@
+services:
+  webapp_scanner:
+    build:
+      context: .
+      dockerfile: Dockerfile.webapp
+    image: device-booking-webapp
+    container_name: device-booking-webapp
+    ports:
+      - "8080:80"
+    restart: unless-stopped

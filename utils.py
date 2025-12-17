@@ -84,6 +84,94 @@ def cleanup_expired_bookings() -> None:
         storage.save_devices()
 
 
+def get_group_by_id(group_id: int) -> Optional[Dict[str, Any]]:
+    """Получить группу по ID."""
+    return next((g for g in storage.groups if g.get("id") == group_id), None)
+
+
+def get_group_by_name(group_name: str) -> Optional[Dict[str, Any]]:
+    """Получить группу по имени."""
+    return next((g for g in storage.groups if g.get("name") == group_name), None)
+
+
+def get_user_group(user_id: int) -> Optional[Dict[str, Any]]:
+    """Получить группу пользователя."""
+    user = get_user_by_id(user_id)
+    if not user:
+        return None
+    group_id = user.get("group_id")
+    if not group_id:
+        return None
+    return get_group_by_id(group_id)
+
+
+def get_device_group(device_id: int) -> Optional[Dict[str, Any]]:
+    """Получить группу устройства."""
+    device = next((d for d in storage.devices if d.get("id") == device_id), None)
+    if not device:
+        return None
+    group_id = device.get("group_id")
+    if not group_id:
+        return None
+    return get_group_by_id(group_id)
+
+
+def can_user_book_device(user_id: int, device_id: int) -> bool:
+    """Проверить, может ли пользователь забронировать устройство.
+    
+    Администраторы могут бронировать любые устройства.
+    Обычные пользователи могут бронировать только устройства из своей группы.
+    Если пользователь или устройство не в группе - бронирование невозможно.
+    """
+    # Администраторы могут бронировать любые устройства
+    if is_admin(user_id):
+        return True
+    
+    user_group = get_user_group(user_id)
+    device_group = get_device_group(device_id)
+    
+    # Если пользователь или устройство не в группе - нельзя бронировать
+    if not user_group or not device_group:
+        return False
+    
+    # Пользователь может бронировать только устройства из своей группы
+    return user_group.get("id") == device_group.get("id")
+
+
+def filter_devices_by_user_group(user_id: int, devices: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Отфильтровать устройства по группе пользователя.
+    
+    Администраторы видят все устройства.
+    Обычные пользователи видят только устройства из своей группы.
+    """
+    # Администраторы видят все устройства
+    if is_admin(user_id):
+        return devices
+    
+    user_group = get_user_group(user_id)
+    
+    # Если пользователь не в группе - не видит устройств
+    if not user_group:
+        return []
+    
+    # Фильтруем устройства по группе
+    user_group_id = user_group.get("id")
+    return [d for d in devices if d.get("group_id") == user_group_id]
+
+
+def get_default_group() -> Optional[Dict[str, Any]]:
+    """Возвращает группу по умолчанию (первая по возрастанию ID)."""
+    if not storage.groups:
+        return None
+    return sorted(storage.groups, key=lambda g: g.get("id", 0))[0]
+
+
+def get_default_group_id() -> Optional[int]:
+    """ID группы по умолчанию."""
+    group = get_default_group()
+    return group.get("id") if group else None
+
+
 def devices_table(devices: List[Dict[str, Any]], mobile_format: bool = False) -> str:
     """Возвращает строку с таблицей устройств.
     

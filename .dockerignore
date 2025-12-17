@@ -1,0 +1,17 @@
+.git
+.venv
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+.idea
+device_logs.json
+device_logs.txt
+devices.json
+users.json
+config.json
+groups.json
+*.csv
+*.xlsx
+*.xls

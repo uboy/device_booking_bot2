@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import csv
 import re
+import os
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -18,6 +19,7 @@ from telegram.ext import ContextTypes
 import storage
 import utils
 from access_control import access_control, main_menu_keyboard
+from libs.device_importer import load_devices_from_file
 from states import BotState
 import json
 import base64
@@ -55,6 +57,15 @@ def _set_state(context: ContextTypes.DEFAULT_TYPE, state: BotState) -> None:
     context.user_data["state"] = state
 
 
+def _format_groups_list() -> str:
+    if not storage.groups:
+        return "— группы не созданы —"
+    lines = []
+    for g in sorted(storage.groups, key=lambda x: x.get("id", 0)):
+        lines.append(f"{g.get('id')}: {g.get('name', 'Без названия')}")
+    return "\n".join(lines)
+
+
 # ==========
 # Команды /help, /start, /register
 # ==========
@@ -72,8 +83,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @access_control()
 async def go_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    is_admin = utils.is_admin(user_id)
     _set_state(context, BotState.NONE)
     context.user_data.pop("scanning_mode", None)  # Выход из режима сканирования
+    context.user_data.pop("pending_registration", None)
     await update.message.reply_text("Главное меню:", reply_markup=main_menu_keyboard(user_id))
 
 
@@ -81,6 +94,7 @@ async def go_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     _set_state(context, BotState.NONE)
+    context.user_data.pop("pending_registration", None)
 
     await update.message.reply_text(
         "Главное меню:\n\n"
@@ -111,19 +125,101 @@ async def register_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if not storage.groups:
+        await update.message.reply_text(
+            "Регистрация временно недоступна. Администратор еще не создал ни одной группы."
+        )
+        return
+
+    context.user_data.pop("pending_registration", None)
+    context.user_data["pending_registration"] = {
+        "user_id": user_id,
+        "username": tg_user.username or "Не указано",
+        "first_name": tg_user.first_name or "Не указано",
+        "last_name": tg_user.last_name or "Не указано",
+        "role": "User",
+        "status": "pending",
+    }
+    _set_state(context, BotState.SELECTING_REG_GROUP)
+
+    inline_buttons = []
+    for group in sorted(storage.groups, key=lambda g: g.get("id", 0)):
+        group_id = group.get("id")
+        inline_buttons.append([
+            InlineKeyboardButton(
+                f"{group.get('name', 'Без названия')} (ID: {group_id})",
+                callback_data=f"reg_group_{group_id}"
+            )
+        ])
+
+    await update.message.reply_text(
+        "Выберите группу, в которой хотите зарегистрироваться. "
+        "После подтверждения администратором вы получите доступ к устройствам этой группы.",
+        reply_markup=InlineKeyboardMarkup(inline_buttons),
+    )
+
+
+@access_control()
+async def register_group_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает выбор группы пользователем при регистрации."""
+    query = update.callback_query
+    if not query or not query.data or not query.data.startswith("reg_group_"):
+        return
+
+    await query.answer()
+
+    state = _get_state(context)
+    if state != BotState.SELECTING_REG_GROUP:
+        await query.edit_message_text(
+            "Эта заявка устарела. Отправьте /register, чтобы начать заново."
+        )
+        return
+
+    pending = context.user_data.get("pending_registration")
+    if not pending or pending.get("user_id") != query.from_user.id:
+        _set_state(context, BotState.NONE)
+        context.user_data.pop("pending_registration", None)
+        await query.edit_message_text(
+            "Данные не найдены. Отправьте /register, чтобы начать регистрацию заново."
+        )
+        return
+
+    if any(u.get("user_id") == pending["user_id"] for u in storage.users):
+        _set_state(context, BotState.NONE)
+        context.user_data.pop("pending_registration", None)
+        await query.edit_message_text("Вы уже подали заявку или зарегистрированы.")
+        return
+
+    match = re.match(r"reg_group_(\d+)", query.data)
+    if not match:
+        await query.edit_message_text("Некорректный формат выбора группы.")
+        return
+
+    group_id = int(match.group(1))
+    group = utils.get_group_by_id(group_id)
+    if not group:
+        await query.edit_message_text("Выбранная группа не найдена. Попробуйте еще раз.")
+        return
+
     storage.users.append(
         {
-            "user_id": user_id,
-            "username": tg_user.username or "Не указано",
-            "first_name": tg_user.first_name or "Не указано",
-            "last_name": tg_user.last_name or "Не указано",
-            "role": "User",
-            "status": "pending",
+            "user_id": pending["user_id"],
+            "username": pending.get("username"),
+            "first_name": pending.get("first_name"),
+            "last_name": pending.get("last_name"),
+            "role": pending.get("role", "User"),
+            "status": pending.get("status", "pending"),
+            "group_id": group_id,
         }
     )
     storage.save_users()
-    await update.message.reply_text(
-        "Ваша заявка на регистрацию отправлена. Ожидайте подтверждения администратора."
+
+    _set_state(context, BotState.NONE)
+    context.user_data.pop("pending_registration", None)
+
+    await query.edit_message_text(
+        f"✅ Заявка отправлена.\nГруппа: {group.get('name', 'Без названия')}.\n"
+        "Как только администратор подтвердит регистрацию, вы получите доступ к устройствам."
     )
 
 
@@ -177,18 +273,21 @@ async def search_devices(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    devices = _search_devices_by_text(search_text)
+    all_devices = _search_devices_by_text(search_text)
+    
+    # Фильтруем устройства по группе пользователя
+    user_id = update.effective_user.id
+    devices = utils.filter_devices_by_user_group(user_id, all_devices)
     
     if not devices:
         await update.message.reply_text(
-            f"❌ По запросу '{search_text}' ничего не найдено.\n\n"
+            f"❌ По запросу '{search_text}' ничего не найдено в вашей группе.\n\n"
             "Попробуйте другой запрос или используйте меню.",
             reply_markup=main_menu_keyboard(update.effective_user.id)
         )
         return
     
     # Показываем найденные устройства с кнопками
-    user_id = update.effective_user.id
     lines = [f"🔍 Найдено устройств: {len(devices)}\n"]
     inline_buttons = []
     
@@ -203,12 +302,20 @@ async def search_devices(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"{status_emoji} **{name}** ({dev_type}) - SN: `{sn}`")
         
         if device_status == "free":
-            inline_buttons.append([
+            row = [
                 InlineKeyboardButton(
                     f"✅ {name} (SN: {sn})",
                     callback_data=f"book_dev_{device['id']}"
                 )
-            ])
+            ]
+            if is_admin:
+                row.append(
+                    InlineKeyboardButton(
+                        "👑 На пользователя",
+                        callback_data=f"admin_book_dev_{device['id']}",
+                    )
+                )
+            inline_buttons.append(row)
         elif device_user_id == user_id:
             expiration = utils.format_datetime(device.get("booking_expiration"))
             inline_buttons.append([
@@ -230,18 +337,30 @@ async def search_devices(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @access_control()
 async def list_devices(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает типы устройств для выбора."""
+    """Показывает типы устройств для выбора (фильтрованные по группе пользователя)."""
     utils.cleanup_expired_bookings()
-    if not storage.devices:
-        await update.message.reply_text("Нет устройств для отображения.")
+    user_id = update.effective_user.id
+    is_admin = utils.is_admin(user_id)
+    
+    # Фильтруем устройства по группе пользователя
+    available_devices = utils.filter_devices_by_user_group(user_id, storage.devices)
+    
+    if not available_devices:
+        user_group = utils.get_user_group(user_id)
+        if not user_group:
+            await update.message.reply_text(
+                "❌ У вас не назначена группа. Обратитесь к администратору для назначения группы."
+            )
+        else:
+            await update.message.reply_text("Нет устройств для отображения в вашей группе.")
         return
 
     # Группируем устройства по типам
-    types = sorted(set(d.get("type", "Неизвестно") for d in storage.devices))
+    types = sorted(set(d.get("type", "Неизвестно") for d in available_devices))
     
     inline_buttons = []
     for dev_type in types:
-        count = len([d for d in storage.devices if d.get("type") == dev_type])
+        count = len([d for d in available_devices if d.get("type") == dev_type])
         inline_buttons.append([InlineKeyboardButton(f"📦 {dev_type} ({count})", callback_data=f"type_{dev_type}")])
     
     await update.message.reply_text(
@@ -254,10 +373,15 @@ async def list_devices(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @access_control()
 async def book_device_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     utils.cleanup_expired_bookings()
-    types_available = sorted({d["type"] for d in storage.devices if d.get("status") == "free"})
-    if not types_available:
-        await update.message.reply_text("Нет доступных устройств для бронирования.")
+    user_id = update.effective_user.id
+    available_devices = [
+        d for d in utils.filter_devices_by_user_group(user_id, storage.devices)
+        if d.get("status") == "free"
+    ]
+    if not available_devices:
+        await update.message.reply_text("Нет доступных устройств для бронирования в вашей группе.")
         return
+    types_available = sorted({d.get("type", "Неизвестно") for d in available_devices})
 
     kb = [[t] for t in types_available]
     kb.append(["Назад"])
@@ -269,16 +393,18 @@ async def book_device_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @access_control()
 async def select_device_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает модели выбранного типа с кнопками действий."""
+    """Показывает модели выбранного типа с кнопками действий (фильтрованные по группе пользователя)."""
     utils.cleanup_expired_bookings()
     text = update.message.text.strip()
+    user_id = update.effective_user.id
     
     # Убираем эмодзи и количество, если есть
     dev_type = re.sub(r'^📦\s*', '', text)
     dev_type = re.sub(r'\s*\(\d+\)$', '', dev_type).strip()
     
-    # Получаем все устройства этого типа (не только свободные)
-    devices = [d for d in storage.devices if d.get("type") == dev_type]
+    # Получаем все устройства этого типа и фильтруем по группе пользователя
+    all_devices = [d for d in storage.devices if d.get("type") == dev_type]
+    devices = utils.filter_devices_by_user_group(user_id, all_devices)
     
     if not devices:
         await update.message.reply_text(
@@ -296,7 +422,6 @@ async def select_device_type(update: Update, context: ContextTypes.DEFAULT_TYPE)
         models[model_name].append(d)
     
     # Формируем сообщение с моделями и кнопками
-    user_id = update.effective_user.id
     lines = []
     inline_buttons = []
     
@@ -316,12 +441,20 @@ async def select_device_type(update: Update, context: ContextTypes.DEFAULT_TYPE)
             
             if device_status == "free":
                 # Кнопка забронировать
-                inline_buttons.append([
+                row = [
                     InlineKeyboardButton(
                         f"✅ {model_name} (SN: {sn})",
                         callback_data=f"book_dev_{device['id']}"
                     )
-                ])
+                ]
+                if is_admin:
+                    row.append(
+                        InlineKeyboardButton(
+                            "👑 На пользователя",
+                            callback_data=f"admin_book_dev_{device['id']}",
+                        )
+                    )
+                inline_buttons.append(row)
             elif device_user_id == user_id:
                 # Кнопка освободить (если забронировано пользователем)
                 expiration = utils.format_datetime(device.get("booking_expiration"))
@@ -396,6 +529,27 @@ async def book_specific_device(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     user_id = update.effective_user.id
+    
+    # Проверка принадлежности к группе (для не-админов)
+    if not utils.is_admin(user_id):
+        if not utils.can_user_book_device(user_id, device_id):
+            user_group = utils.get_user_group(user_id)
+            device_group = utils.get_device_group(device_id)
+            if not user_group:
+                await update.message.reply_text(
+                    "❌ У вас не назначена группа. Обратитесь к администратору."
+                )
+            elif not device_group:
+                await update.message.reply_text(
+                    "❌ Устройство не назначено ни в какую группу."
+                )
+            else:
+                await update.message.reply_text(
+                    f"❌ Вы не можете бронировать устройства из группы '{device_group.get('name')}'. "
+                    f"Ваша группа: '{user_group.get('name')}'."
+                )
+            return
+    
     # лимит устройств
     max_devices = storage.config.get("max_devices_per_user", 2)
     current_count = len([d for d in storage.devices if d.get("user_id") == user_id and d.get("status") == "booked"])
@@ -566,6 +720,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     inline_kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("📋 Управление устройствами", callback_data="manage_devices_admin")],
         [InlineKeyboardButton("👥 Управление пользователями", callback_data="manage_users_admin")],
+        [InlineKeyboardButton("👥 Управление группами", callback_data="manage_groups_admin")],
         [InlineKeyboardButton("🔒 Забронированные устройства", callback_data="view_booked_admin")],
         [
             InlineKeyboardButton("📥 Экспорт устройств", callback_data="export_devices_admin"),
@@ -577,6 +732,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Также оставляем текстовые кнопки для совместимости
     kb = [
         ["Управление устройствами", "Управление пользователями"],
+        ["Управление группами"],
         ["Просмотр забронированных устройств"],
         ["Экспорт устройств CSV", "Экспорт пользователей CSV"],
         ["Экспорт логов CSV"],
@@ -879,6 +1035,12 @@ async def manage_devices(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def admin_devices_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if text.lower() == "add":
+        if not storage.groups:
+            await update.message.reply_text(
+                "❌ Сначала создайте хотя бы одну группу в разделе 'Управление группами'."
+            )
+            return
+        context.user_data["new_device_data"] = {}
         _set_state(context, BotState.ADDING_DEVICE_NAME)
         await update.message.reply_text(
             "➕ **Добавление устройства**\n\n"
@@ -931,6 +1093,99 @@ async def handle_state_message(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     
     text = update.message.text.strip()
+
+    if state == BotState.ADDING_DEVICE_NAME:
+        device_name = text.strip()
+        if len(device_name) < 2:
+            await update.message.reply_text("Название устройства должно содержать минимум 2 символа.")
+            return
+        context.user_data.setdefault("new_device_data", {})["name"] = device_name
+        _set_state(context, BotState.ADDING_DEVICE_SN)
+        await update.message.reply_text(
+            "Введите серийный номер устройства:"
+        )
+        return
+
+    if state == BotState.ADDING_DEVICE_SN:
+        sn = text.strip()
+        if not sn:
+            await update.message.reply_text("Серийный номер не может быть пустым.")
+            return
+        context.user_data.setdefault("new_device_data", {})["sn"] = sn
+        device_types = storage.config.get("device_types", [])
+        _set_state(context, BotState.ADDING_DEVICE_TYPE)
+        types_text = ", ".join(device_types) if device_types else "типов нет"
+        await update.message.reply_text(
+            "Введите тип устройства.\n"
+            f"Доступные типы: {types_text}"
+        )
+        return
+
+    if state == BotState.ADDING_DEVICE_TYPE:
+        dev_type = text.strip()
+        device_types = storage.config.get("device_types", [])
+        if device_types and dev_type not in device_types:
+            await update.message.reply_text(
+                "Неизвестный тип. Используйте один из доступных: "
+                + ", ".join(device_types)
+            )
+            return
+        context.user_data.setdefault("new_device_data", {})["type"] = dev_type
+        if not storage.groups:
+            await update.message.reply_text(
+                "❌ Нет доступных групп. Создайте группу и начните добавление заново."
+            )
+            context.user_data.pop("new_device_data", None)
+            _set_state(context, BotState.NONE)
+            return
+        _set_state(context, BotState.ADDING_DEVICE_GROUP)
+        groups_text = _format_groups_list()
+        await update.message.reply_text(
+            "Введите ID группы, к которой будет относиться устройство:\n"
+            f"{groups_text}"
+        )
+        return
+
+    if state == BotState.ADDING_DEVICE_GROUP:
+        device_data = context.user_data.get("new_device_data")
+        if not device_data:
+            await update.message.reply_text("Данные устройства не найдены. Начните заново.")
+            _set_state(context, BotState.NONE)
+            return
+        try:
+            group_id = int(text)
+        except ValueError:
+            await update.message.reply_text("ID группы должен быть числом. Попробуйте снова.")
+            return
+        group = utils.get_group_by_id(group_id)
+        if not group:
+            await update.message.reply_text("Группа не найдена. Введите корректный ID.")
+            return
+
+        new_id = max([d.get("id", 0) for d in storage.devices], default=0) + 1
+        device = {
+            "id": new_id,
+            "name": device_data.get("name"),
+            "sn": device_data.get("sn"),
+            "type": device_data.get("type"),
+            "status": "free",
+            "group_id": group_id,
+        }
+        storage.devices.append(device)
+        storage.save_devices()
+        group_name = group.get("name", "Без названия")
+        _set_state(context, BotState.NONE)
+        context.user_data.pop("new_device_data", None)
+        await update.message.reply_text(
+            "✅ Устройство добавлено:\n"
+            f"🆔 ID: {new_id}\n"
+            f"📱 {device['name']}\n"
+            f"🔢 SN: {device['sn']}\n"
+            f"📦 Тип: {device['type']}\n"
+            f"👥 Группа: {group_name}"
+        )
+        await show_admin_devices_by_type(update, context, device["type"])
+        return
 
     if state == BotState.ADDING_DEVICE:
         # Используется для редактирования устройств или старого формата добавления
@@ -999,6 +1254,65 @@ async def handle_state_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(f"Устройство {name} добавлено.")
         return
 
+    if state == BotState.ADDING_GROUP_NAME:
+        group_name = text.strip()
+        if not group_name:
+            await update.message.reply_text("Название группы не может быть пустым.")
+            return
+        
+        # Проверяем, переименование или создание
+        rename_group_id = context.user_data.get("rename_group_id")
+        
+        if rename_group_id:
+            # Переименование группы
+            group = utils.get_group_by_id(rename_group_id)
+            if not group:
+                await update.message.reply_text("❌ Группа не найдена.")
+                _set_state(context, BotState.NONE)
+                context.user_data.pop("rename_group_id", None)
+                return
+            
+            # Проверяем, не существует ли уже группа с таким именем
+            existing_group = utils.get_group_by_name(group_name)
+            if existing_group and existing_group.get("id") != rename_group_id:
+                await update.message.reply_text(f"Группа с названием '{group_name}' уже существует.")
+                return
+            
+            old_name = group.get("name")
+            group["name"] = group_name
+            storage.save_groups()
+            _set_state(context, BotState.NONE)
+            context.user_data.pop("rename_group_id", None)
+            
+            await update.message.reply_text(
+                f"✅ Группа переименована:\n"
+                f"Было: {old_name}\n"
+                f"Стало: {group_name}"
+            )
+            return
+        
+        # Создание новой группы
+        # Проверяем, не существует ли уже группа с таким именем
+        if utils.get_group_by_name(group_name):
+            await update.message.reply_text(f"Группа с названием '{group_name}' уже существует.")
+            _set_state(context, BotState.NONE)
+            return
+        
+        # Создаем новую группу
+        new_id = max([g.get("id", 0) for g in storage.groups], default=0) + 1
+        storage.groups.append({
+            "id": new_id,
+            "name": group_name
+        })
+        storage.save_groups()
+        _set_state(context, BotState.NONE)
+        
+        await update.message.reply_text(
+            f"✅ Группа '{group_name}' создана (ID: {new_id}).\n\n"
+            f"Теперь вы можете назначить пользователей и устройства этой группе."
+        )
+        return
+    
     # если состояние другое (ADD_USER/EDIT_USER) — обработаем ниже в блоке управления пользователями
     # если никаких спец-состояний — ничего не делаем
     return
@@ -1010,7 +1324,7 @@ async def handle_state_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
 @access_control(required_role="Admin")
 async def import_devices_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Отправьте CSV-файл с колонками: SN, Name, Type.")
+    await update.message.reply_text("Отправьте CSV или XLSX с колонками: SN, Name, Type.")
     context.user_data["awaiting_devices_csv"] = True
 
 
@@ -1029,30 +1343,27 @@ async def process_devices_csv(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     added = 0
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            required = {"SN", "Name", "Type"}
-            if not required.issubset(set(reader.fieldnames or [])):
-                await update.message.reply_text("Ошибка: в CSV должны быть колонки SN, Name, Type.")
-                return
-            max_id = max([d.get("id", 0) for d in storage.devices], default=0)
-            for row in reader:
-                max_id += 1
-                storage.devices.append(
-                    {
-                        "id": max_id,
-                        "name": row["Name"].strip(),
-                        "sn": row["SN"].strip(),
-                        "type": row["Type"].strip(),
-                        "status": "free",
-                    }
-                )
-                added += 1
+        rows = load_devices_from_file(file_path)
+        max_id = max([d.get("id", 0) for d in storage.devices], default=0)
+        for row in rows:
+            if not row["SN"] and not row["Name"]:
+                continue
+            max_id += 1
+            storage.devices.append(
+                {
+                    "id": max_id,
+                    "name": row["Name"],
+                    "sn": row["SN"],
+                    "type": row["Type"],
+                    "status": "free",
+                }
+            )
+            added += 1
         storage.save_devices()
         await update.message.reply_text(f"Устройства импортированы. Добавлено: {added}.")
+    except ValueError as err:
+        await update.message.reply_text(f"Ошибка импорта: {err}")
     finally:
-        import os
-
         try:
             os.remove(file_path)
         except OSError:
@@ -1157,6 +1468,12 @@ async def add_user_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Начинает процесс добавления пользователя."""
     query = update.callback_query
     await query.answer()
+
+    if not storage.groups:
+        await query.edit_message_text(
+            "❌ Сначала создайте хотя бы одну группу в разделе 'Управление группами'."
+        )
+        return
     
     _set_state(context, BotState.ADDING_USER_ID)
     await query.edit_message_text(
@@ -1198,6 +1515,11 @@ async def admin_users_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # adduser
     if text.lower() == "adduser":
+        if not storage.groups:
+            await update.message.reply_text(
+                "❌ Нет доступных групп. Сначала создайте группу в разделе 'Управление группами'."
+            )
+            return
         _set_state(context, BotState.ADDING_USER)
         await update.message.reply_text(
             "Введите пользователя в формате: Имя, Фамилия, username, роль\n"
@@ -1273,26 +1595,28 @@ async def handle_state_user_message(update: Update, context: ContextTypes.DEFAUL
             last_name = "Не указано"
             username = "Не указано"
         
-        # Добавляем пользователя
-        storage.users.append(
-            {
-                "user_id": user_id,
-                "first_name": first_name,
-                "last_name": last_name,
-                "username": username,
-                "role": "User",
-                "status": "active",
-                "phone": "",  # Поле телефона
-            }
-        )
-        storage.save_users()
-        _set_state(context, BotState.NONE)
+        if not storage.groups:
+            await update.message.reply_text(
+                "❌ Нет доступных групп. Сначала создайте группу, затем добавьте пользователя."
+            )
+            _set_state(context, BotState.NONE)
+            return
+        
+        context.user_data["pending_user"] = {
+            "user_id": user_id,
+            "first_name": first_name,
+            "last_name": last_name,
+            "username": username,
+            "role": "User",
+            "status": "active",
+            "phone": "",
+            "source": "tg_id",
+        }
+        _set_state(context, BotState.ADDING_USER_GROUP)
+        groups_text = _format_groups_list()
         await update.message.reply_text(
-            f"✅ Пользователь добавлен:\n"
-            f"🆔 ID: {user_id}\n"
-            f"👤 {first_name} {last_name}\n"
-            f"📱 @{username}\n\n"
-            f"Используйте 'Изменить пользователя' для добавления телефона или изменения роли."
+            "Введите ID группы для пользователя:\n"
+            f"{groups_text}"
         )
         return
 
@@ -1305,21 +1629,30 @@ async def handle_state_user_message(update: Update, context: ContextTypes.DEFAUL
             )
             return
 
+        if not storage.groups:
+            await update.message.reply_text(
+                "❌ Нет доступных групп. Сначала создайте группу, затем добавьте пользователя."
+            )
+            _set_state(context, BotState.NONE)
+            return
+        
         new_id = max([u.get("user_id", 0) for u in storage.users], default=0) + 1
-        storage.users.append(
-            {
-                "user_id": new_id,
-                "first_name": first_name,
-                "last_name": last_name,
-                "username": username,
-                "role": role,
-                "status": "active",
-                "phone": "",  # Поле телефона
-            }
+        context.user_data["pending_user"] = {
+            "user_id": new_id,
+            "first_name": first_name,
+            "last_name": last_name,
+            "username": username,
+            "role": role,
+            "status": "active",
+            "phone": "",
+            "source": "manual",
+        }
+        _set_state(context, BotState.ADDING_USER_GROUP)
+        groups_text = _format_groups_list()
+        await update.message.reply_text(
+            "Введите ID группы для пользователя:\n"
+            f"{groups_text}"
         )
-        storage.save_users()
-        _set_state(context, BotState.NONE)
-        await update.message.reply_text(f"Пользователь @{username} добавлен.")
         return
 
     if state == BotState.EDITING_USER:
@@ -1351,6 +1684,46 @@ async def handle_state_user_message(update: Update, context: ContextTypes.DEFAUL
         storage.save_users()
         _set_state(context, BotState.NONE)
         await update.message.reply_text("Данные пользователя обновлены.")
+        return
+
+    if state == BotState.ADDING_USER_GROUP:
+        pending_user = context.user_data.get("pending_user")
+        if not pending_user:
+            await update.message.reply_text("Нет данных пользователя. Начните заново.")
+            _set_state(context, BotState.NONE)
+            return
+        try:
+            group_id = int(text)
+        except ValueError:
+            await update.message.reply_text("ID группы должен быть числом. Попробуйте еще раз.")
+            return
+        group = utils.get_group_by_id(group_id)
+        if not group:
+            await update.message.reply_text("Группа не найдена. Введите корректный ID.")
+            return
+        
+        pending_user["group_id"] = group_id
+        storage.users.append({k: v for k, v in pending_user.items() if k != "source"})
+        storage.save_users()
+        
+        source = pending_user.get("source")
+        _set_state(context, BotState.NONE)
+        context.user_data.pop("pending_user", None)
+        group_name = group.get("name", "Без названия")
+        
+        if source == "tg_id":
+            await update.message.reply_text(
+                f"✅ Пользователь добавлен:\n"
+                f"🆔 ID: {pending_user['user_id']}\n"
+                f"👤 {pending_user.get('first_name')} {pending_user.get('last_name')}\n"
+                f"📱 @{pending_user.get('username')}\n"
+                f"👥 Группа: {group_name}\n\n"
+                f"Используйте 'Изменить пользователя' для добавления телефона или изменения роли."
+            )
+        else:
+            await update.message.reply_text(
+                f"Пользователь @{pending_user.get('username')} добавлен в группу '{group_name}'."
+            )
         return
 
 
@@ -1547,6 +1920,14 @@ async def add_device_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     """Начинает процесс добавления устройства."""
     query = update.callback_query
     await query.answer()
+
+    if not storage.groups:
+        await query.edit_message_text(
+            "❌ Сначала создайте хотя бы одну группу, чтобы назначать устройства."
+        )
+        return
+    
+    context.user_data["new_device_data"] = {}
     
     _set_state(context, BotState.ADDING_DEVICE_NAME)
     await query.edit_message_text(
@@ -2287,6 +2668,26 @@ async def scan_book_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     user_id = update.effective_user.id
     
+    # Проверка принадлежности к группе (для не-админов)
+    if not utils.is_admin(user_id):
+        if not utils.can_user_book_device(user_id, device_id):
+            user_group = utils.get_user_group(user_id)
+            device_group = utils.get_device_group(device_id)
+            if not user_group:
+                await query.edit_message_text(
+                    "❌ У вас не назначена группа. Обратитесь к администратору."
+                )
+            elif not device_group:
+                await query.edit_message_text(
+                    "❌ Устройство не назначено ни в какую группу."
+                )
+            else:
+                await query.edit_message_text(
+                    f"❌ Вы не можете бронировать устройства из группы '{device_group.get('name')}'. "
+                    f"Ваша группа: '{user_group.get('name')}'."
+                )
+            return
+    
     # Проверка лимита устройств
     max_devices = storage.config.get("max_devices_per_user", 2)
     current_count = len(
@@ -2612,6 +3013,26 @@ async def book_device_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     
     user_id = update.effective_user.id
     
+    # Проверка принадлежности к группе (для не-админов)
+    if not utils.is_admin(user_id):
+        if not utils.can_user_book_device(user_id, device_id):
+            user_group = utils.get_user_group(user_id)
+            device_group = utils.get_device_group(device_id)
+            if not user_group:
+                await query.edit_message_text(
+                    "❌ У вас не назначена группа. Обратитесь к администратору."
+                )
+            elif not device_group:
+                await query.edit_message_text(
+                    "❌ Устройство не назначено ни в какую группу."
+                )
+            else:
+                await query.edit_message_text(
+                    f"❌ Вы не можете бронировать устройства из группы '{device_group.get('name')}'. "
+                    f"Ваша группа: '{user_group.get('name')}'."
+                )
+            return
+    
     # Проверка лимита устройств
     max_devices = storage.config.get("max_devices_per_user", 2)
     current_count = len(
@@ -2647,6 +3068,143 @@ async def book_device_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         f"Забронировано пользователем {utils.get_user_full_name(user_id)} "
         f"до {expiration.strftime('%Y-%m-%d %H:%M:%S')}.",
     )
+
+
+@access_control(required_role="Admin")
+async def admin_book_device_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показ списка пользователей для бронирования устройства администратором."""
+    query = update.callback_query
+    await query.answer()
+    
+    match = re.match(r"admin_book_dev_(\d+)", query.data)
+    if not match:
+        await query.edit_message_text("Ошибка: некорректный формат команды.")
+        return
+    
+    device_id = int(match.group(1))
+    device = next((d for d in storage.devices if d.get("id") == device_id), None)
+    
+    if not device or device.get("status") != "free":
+        await query.answer("Устройство уже забронировано или не найдено.", show_alert=True)
+        return
+    
+    active_users = [u for u in storage.users if u.get("status") == "active"]
+    if not active_users:
+        await query.message.reply_text("Нет активных пользователей для назначения.")
+        return
+    
+    max_users = 30
+    shown_users = active_users[:max_users]
+    buttons = []
+    for user in shown_users:
+        user_id = user.get("user_id")
+        if not user_id:
+            continue
+        full_name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or user.get("username", f"ID {user_id}")
+        if len(full_name) > 32:
+            full_name = full_name[:31] + "…"
+        buttons.append([
+            InlineKeyboardButton(
+                f"{full_name} [{user_id}]",
+                callback_data=f"admin_book_select_{device_id}_{user_id}",
+            )
+        ])
+    
+    if len(active_users) > max_users:
+        extra = len(active_users) - max_users
+        info_text = f"Показаны первые {max_users} пользователей. Еще: {extra}."
+    else:
+        info_text = ""
+    
+    buttons.append([InlineKeyboardButton("❌ Отмена", callback_data="admin_book_cancel")])
+    
+    text = (
+        f"👑 **Бронирование устройства на пользователя**\n\n"
+        f"Устройство: **{device.get('name', 'Неизвестно')}**\n"
+        f"SN: `{device.get('sn', 'N/A')}` | Тип: {device.get('type', 'N/A')}\n\n"
+        "Выберите пользователя:\n"
+    )
+    if info_text:
+        text += f"\n_{info_text}_"
+    
+    await query.message.reply_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+@access_control(required_role="Admin")
+async def admin_book_select_user_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Завершает бронирование устройства на выбранного пользователя."""
+    query = update.callback_query
+    await query.answer()
+    
+    match = re.match(r"admin_book_select_(\d+)_(\d+)", query.data)
+    if not match:
+        await query.edit_message_text("Ошибка: некорректный формат команды.")
+        return
+    
+    device_id = int(match.group(1))
+    target_user_id = int(match.group(2))
+    
+    device = next((d for d in storage.devices if d.get("id") == device_id), None)
+    target_user = utils.get_user_by_id(target_user_id)
+    
+    if not device or device.get("status") != "free":
+        await query.edit_message_text("❌ Устройство уже забронировано или не найдено.")
+        return
+    
+    if not target_user or target_user.get("status") != "active":
+        await query.edit_message_text("❌ Пользователь не найден или не активен.")
+        return
+    
+    default_days = device.get(
+        "default_booking_period",
+        storage.config.get("default_booking_period_days", 1),
+    )
+    now = datetime.now()
+    expiration = now + timedelta(days=default_days)
+    
+    device["status"] = "booked"
+    device["user_id"] = target_user_id
+    device["booking_expiration"] = expiration.isoformat()
+    storage.save_devices()
+    
+    target_name = utils.get_user_full_name(target_user_id)
+    admin_name = utils.get_user_full_name(update.effective_user.id)
+    
+    await query.edit_message_text(
+        f"✅ Устройство **{device.get('name', 'N/A')}** (SN: `{device.get('sn', 'N/A')}`)\n"
+        f"забронировано на пользователя **{target_name}** до {expiration.strftime('%d.%m.%Y %H:%M')}.\n\n"
+        f"Инициатор: {admin_name}",
+        parse_mode="Markdown",
+    )
+    
+    utils.log_action(
+        device.get("sn", "N/A"),
+        f"Админ {admin_name} забронировал на пользователя {target_name} до {expiration.strftime('%Y-%m-%d %H:%M:%S')}.",
+    )
+    
+    try:
+        await context.bot.send_message(
+            chat_id=target_user_id,
+            text=(
+                f"👑 Администратор назначил вам устройство **{device.get('name', 'N/A')}** "
+                f"(SN: `{device.get('sn', 'N/A')}`) до {expiration.strftime('%d.%m.%Y %H:%M')}."
+            ),
+            parse_mode="Markdown",
+        )
+    except Exception:
+        pass
+
+
+@access_control(required_role="Admin")
+async def admin_book_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отмена выбора пользователя при админском бронировании."""
+    query = update.callback_query
+    await query.answer("Отменено")
+    await query.edit_message_text("❌ Бронирование отменено.")
 
 
 async def release_device_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2793,9 +3351,11 @@ async def select_device_type_callback(update: Update, context: ContextTypes.DEFA
     
     dev_type = query.data[5:]  # Убираем префикс "type_"
     utils.cleanup_expired_bookings()
+    user_id = update.effective_user.id
     
-    # Получаем все устройства этого типа
-    devices = [d for d in storage.devices if d.get("type") == dev_type]
+    # Получаем все устройства этого типа и фильтруем по группе пользователя
+    all_devices = [d for d in storage.devices if d.get("type") == dev_type]
+    devices = utils.filter_devices_by_user_group(user_id, all_devices)
     
     if not devices:
         await query.edit_message_text(
@@ -2813,7 +3373,6 @@ async def select_device_type_callback(update: Update, context: ContextTypes.DEFA
         models[model_name].append(d)
     
     # Формируем сообщение с моделями и кнопками
-    user_id = update.effective_user.id
     lines = [f"📦 **{dev_type}**\n"]
     inline_buttons = []
     
@@ -2833,12 +3392,20 @@ async def select_device_type_callback(update: Update, context: ContextTypes.DEFA
             
             if device_status == "free":
                 # Кнопка забронировать
-                inline_buttons.append([
+                row = [
                     InlineKeyboardButton(
                         f"✅ {model_name} (SN: {sn})",
                         callback_data=f"book_dev_{device['id']}"
                     )
-                ])
+                ]
+                if is_admin:
+                    row.append(
+                        InlineKeyboardButton(
+                            "👑 На пользователя",
+                            callback_data=f"admin_book_dev_{device['id']}",
+                        )
+                    )
+                inline_buttons.append(row)
             elif device_user_id == user_id:
                 # Кнопка освободить (если забронировано пользователем)
                 expiration = utils.format_datetime(device.get("booking_expiration"))
@@ -3070,6 +3637,396 @@ async def handle_web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 # ==========
+# Управление группами
+# ==========
+
+@access_control(required_role="Admin")
+async def manage_groups_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Меню управления группами."""
+    query = update.callback_query
+    if query:
+        await query.answer()
+        msg = query.message
+    else:
+        msg = update.message
+    
+    if not storage.groups:
+        inline_buttons = [
+            [InlineKeyboardButton("➕ Создать группу", callback_data="add_group")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="back_to_admin")]
+        ]
+        text = "👥 **Управление группами**\n\nПока нет групп. Создайте первую группу:"
+    else:
+        inline_buttons = []
+        for group in sorted(storage.groups, key=lambda x: x.get("id", 0)):
+            group_id = group.get("id")
+            group_name = group.get("name", "Без названия")
+            # Подсчитываем пользователей и устройства в группе
+            users_count = len([u for u in storage.users if u.get("group_id") == group_id])
+            devices_count = len([d for d in storage.devices if d.get("group_id") == group_id])
+            inline_buttons.append([
+                InlineKeyboardButton(
+                    f"👥 {group_name} ({users_count} пользователей, {devices_count} устройств)",
+                    callback_data=f"edit_group_{group_id}"
+                )
+            ])
+        
+        inline_buttons.append([InlineKeyboardButton("➕ Создать группу", callback_data="add_group")])
+        inline_buttons.append([InlineKeyboardButton("◀️ Назад", callback_data="back_to_admin")])
+        
+        text = f"👥 **Управление группами**\n\nВсего групп: {len(storage.groups)}\n\nВыберите группу для редактирования:"
+    
+    if query:
+        await query.edit_message_text(
+            text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(inline_buttons),
+        )
+    else:
+        await msg.reply_text(
+            text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(inline_buttons),
+        )
+
+
+@access_control(required_role="Admin")
+async def add_group_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начало процесса создания группы."""
+    query = update.callback_query
+    await query.answer()
+    
+    _set_state(context, BotState.ADDING_GROUP_NAME)
+    await query.edit_message_text(
+        "➕ **Создание новой группы**\n\n"
+        "Введите название группы:",
+        parse_mode="Markdown"
+    )
+
+
+@access_control(required_role="Admin")
+async def edit_group_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Редактирование группы."""
+    query = update.callback_query
+    await query.answer()
+    
+    match = re.match(r"edit_group_(\d+)", query.data)
+    if not match:
+        await query.edit_message_text("Ошибка: некорректный формат команды.")
+        return
+    
+    group_id = int(match.group(1))
+    group = utils.get_group_by_id(group_id)
+    
+    if not group:
+        await query.edit_message_text("❌ Группа не найдена.")
+        return
+    
+    group_name = group.get("name", "Без названия")
+    users_count = len([u for u in storage.users if u.get("group_id") == group_id])
+    devices_count = len([d for d in storage.devices if d.get("group_id") == group_id])
+    
+    inline_buttons = [
+        [InlineKeyboardButton("✏️ Изменить название", callback_data=f"rename_group_{group_id}")],
+        [InlineKeyboardButton("👥 Назначить пользователям", callback_data=f"assign_group_users_{group_id}")],
+        [InlineKeyboardButton("📱 Назначить устройствам", callback_data=f"assign_group_devices_{group_id}")],
+        [InlineKeyboardButton("🗑️ Удалить группу", callback_data=f"delete_group_{group_id}")],
+        [InlineKeyboardButton("◀️ Назад", callback_data="manage_groups_admin")]
+    ]
+    
+    text = (
+        f"👥 **Группа: {group_name}**\n\n"
+        f"🆔 ID: {group_id}\n"
+        f"👥 Пользователей: {users_count}\n"
+        f"📱 Устройств: {devices_count}\n\n"
+        f"Выберите действие:"
+    )
+    
+    await query.edit_message_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_buttons),
+    )
+
+
+@access_control(required_role="Admin")
+async def delete_group_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Удаление группы."""
+    query = update.callback_query
+    await query.answer()
+    
+    match = re.match(r"delete_group_(\d+)", query.data)
+    if not match:
+        await query.edit_message_text("Ошибка: некорректный формат команды.")
+        return
+    
+    group_id = int(match.group(1))
+    group = utils.get_group_by_id(group_id)
+    
+    if not group:
+        await query.edit_message_text("❌ Группа не найдена.")
+        return
+    
+    group_name = group.get("name", "Без названия")
+    
+    # Удаляем группу из пользователей и устройств
+    users_updated = 0
+    devices_updated = 0
+    for user in storage.users:
+        if user.get("group_id") == group_id:
+            user.pop("group_id", None)
+            users_updated += 1
+    
+    for device in storage.devices:
+        if device.get("group_id") == group_id:
+            device.pop("group_id", None)
+            devices_updated += 1
+    
+    # Удаляем группу
+    storage.groups.remove(group)
+    storage.save_groups()
+    storage.save_users()
+    storage.save_devices()
+    
+    await query.edit_message_text(
+        f"✅ Группа '{group_name}' удалена.\n\n"
+        f"У {users_updated} пользователей и {devices_updated} устройств снята принадлежность к группе."
+    )
+    
+    # Возвращаемся к списку групп
+    await manage_groups_admin(update, context)
+
+
+@access_control(required_role="Admin")
+async def rename_group_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начало процесса переименования группы."""
+    query = update.callback_query
+    await query.answer()
+    
+    match = re.match(r"rename_group_(\d+)", query.data)
+    if not match:
+        await query.edit_message_text("Ошибка: некорректный формат команды.")
+        return
+    
+    group_id = int(match.group(1))
+    group = utils.get_group_by_id(group_id)
+    
+    if not group:
+        await query.edit_message_text("❌ Группа не найдена.")
+        return
+    
+    context.user_data["rename_group_id"] = group_id
+    _set_state(context, BotState.ADDING_GROUP_NAME)
+    
+    await query.edit_message_text(
+        f"✏️ **Переименование группы**\n\n"
+        f"Текущее название: {group.get('name')}\n\n"
+        f"Введите новое название группы:",
+        parse_mode="Markdown"
+    )
+
+
+@access_control(required_role="Admin")
+async def assign_group_users_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Назначение/снятие пользователей группы."""
+    query = update.callback_query
+    await query.answer()
+    
+    match = re.match(r"assign_group_users_(\d+)", query.data)
+    if not match:
+        await query.edit_message_text("Ошибка: некорректный формат команды.")
+        return
+    
+    group_id = int(match.group(1))
+    await _render_group_assignment(query, group_id, mode="users")
+
+
+@access_control(required_role="Admin")
+async def assign_group_devices_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Назначение/снятие устройств группы."""
+    query = update.callback_query
+    await query.answer()
+    
+    match = re.match(r"assign_group_devices_(\d+)", query.data)
+    if not match:
+        await query.edit_message_text("Ошибка: некорректный формат команды.")
+        return
+    
+    group_id = int(match.group(1))
+    await _render_group_assignment(query, group_id, mode="devices")
+
+
+@access_control(required_role="Admin")
+async def toggle_group_user_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Переключает принадлежность пользователя к группе."""
+    query = update.callback_query
+    
+    match = re.match(r"toggle_group_user_(\d+)_(\d+)", query.data)
+    if not match:
+        await query.edit_message_text("Ошибка: некорректный формат команды.")
+        return
+    
+    group_id = int(match.group(1))
+    user_id = int(match.group(2))
+    
+    group = utils.get_group_by_id(group_id)
+    user = utils.get_user_by_id(user_id)
+    
+    if not group or not user:
+        await query.edit_message_text("❌ Группа или пользователь не найдены.")
+        return
+    
+    current_group_id = user.get("group_id")
+    if current_group_id == group_id:
+        user.pop("group_id", None)
+        response = f"Пользователь {utils.get_user_full_name(user_id)} удален из группы."
+    else:
+        user["group_id"] = group_id
+        response = f"Пользователь {utils.get_user_full_name(user_id)} назначен в группу '{group.get('name')}'."
+    storage.save_users()
+    
+    await query.answer(response[:200])
+    await _render_group_assignment(query, group_id, mode="users")
+
+
+@access_control(required_role="Admin")
+async def toggle_group_device_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Переключает принадлежность устройства к группе."""
+    query = update.callback_query
+    
+    match = re.match(r"toggle_group_device_(\d+)_(\d+)", query.data)
+    if not match:
+        await query.edit_message_text("Ошибка: некорректный формат команды.")
+        return
+    
+    group_id = int(match.group(1))
+    device_id = int(match.group(2))
+    
+    group = utils.get_group_by_id(group_id)
+    device = next((d for d in storage.devices if d.get("id") == device_id), None)
+    
+    if not group or not device:
+        await query.edit_message_text("❌ Группа или устройство не найдены.")
+        return
+    
+    current_group_id = device.get("group_id")
+    if current_group_id == group_id:
+        device.pop("group_id", None)
+        response = f"Устройство {device.get('name')} удалено из группы."
+    else:
+        device["group_id"] = group_id
+        response = f"Устройство {device.get('name')} назначено в группу '{group.get('name')}'."
+    storage.save_devices()
+    
+    await query.answer(response[:200])
+    await _render_group_assignment(query, group_id, mode="devices")
+
+
+async def _render_group_assignment(query, group_id: int, mode: str) -> None:
+    """Показывает список пользователей/устройств для назначения группе."""
+    group = utils.get_group_by_id(group_id)
+    if not group:
+        await query.edit_message_text("❌ Группа не найдена.")
+        return
+    
+    group_name = group.get("name", "Без названия")
+    inline_buttons = []
+    
+    def _shorten(text: str, limit: int = 32) -> str:
+        return text if len(text) <= limit else text[: limit - 1] + "…"
+    
+    if mode == "users":
+        items = sorted(
+            storage.users,
+            key=lambda u: (u.get("first_name", ""), u.get("last_name", ""), u.get("user_id", 0)),
+        )
+        if not items:
+            text = (
+                f"👥 **Группа: {group_name}**\n\n"
+                "Нет пользователей. Добавьте пользователей перед назначением в группу."
+            )
+        else:
+            lines = [
+                f"👥 **Группа: {group_name}**",
+                "📝 Нажмите на пользователя, чтобы добавить или убрать из группы.",
+                "✅ — в группе, 🔁 — в другой группе, ➕ — без группы.",
+                "",
+            ]
+            inline_buttons = []
+            for user in items:
+                user_id = user.get("user_id")
+                if not user_id:
+                    continue
+                full_name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or user.get("username", "Без имени")
+                full_name = _shorten(full_name)
+                current_group_id = user.get("group_id")
+                if current_group_id == group_id:
+                    prefix = "✅"
+                elif current_group_id:
+                    other_group = utils.get_group_by_id(current_group_id)
+                    other_name = other_group.get("name") if other_group else "Другая группа"
+                    prefix = "🔁"
+                    full_name = f"{full_name} • {_shorten(other_name, 14)}"
+                else:
+                    prefix = "➕"
+                inline_buttons.append([
+                    InlineKeyboardButton(
+                        f"{prefix} {full_name} [{user_id}]",
+                        callback_data=f"toggle_group_user_{group_id}_{user_id}",
+                    )
+                ])
+            text = "\n".join(lines)
+    else:  # devices
+        items = sorted(
+            storage.devices,
+            key=lambda d: (d.get("type", ""), d.get("name", ""), d.get("sn", "")),
+        )
+        if not items:
+            text = (
+                f"📱 **Группа: {group_name}**\n\n"
+                "Нет устройств. Добавьте устройства перед назначением в группу."
+            )
+        else:
+            lines = [
+                f"📱 **Группа: {group_name}**",
+                "📝 Нажмите на устройство, чтобы добавить или убрать из группы.",
+                "✅ — в группе, 🔁 — в другой группе, ➕ — без группы.",
+                "",
+            ]
+            inline_buttons = []
+            for device in items:
+                device_id = device.get("id")
+                if device_id is None:
+                    continue
+                name = _shorten(device.get("name", "Без названия"))
+                sn = device.get("sn", "N/A")
+                current_group_id = device.get("group_id")
+                if current_group_id == group_id:
+                    prefix = "✅"
+                elif current_group_id:
+                    other_group = utils.get_group_by_id(current_group_id)
+                    other_name = other_group.get("name") if other_group else "Другая группа"
+                    prefix = "🔁"
+                    name = f"{name} • {_shorten(other_name, 14)}"
+                else:
+                    prefix = "➕"
+                inline_buttons.append([
+                    InlineKeyboardButton(
+                        f"{prefix} {name} (SN: {sn})",
+                        callback_data=f"toggle_group_device_{group_id}_{device_id}",
+                    )
+                ])
+            text = "\n".join(lines)
+    
+    inline_buttons.append([InlineKeyboardButton("◀️ Назад", callback_data=f"edit_group_{group_id}")])
+    await query.edit_message_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_buttons),
+    )
+
+
+# ==========
 # Неизвестные сообщения
 # ==========
 
@@ -3095,6 +4052,13 @@ async def unknown_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "Для использования сканирования необходимо быть зарегистрированным пользователем.\n"
             "Используйте /register для регистрации."
+        )
+        return
+
+    if state == BotState.SELECTING_REG_GROUP and update.message and update.message.text:
+        await update.message.reply_text(
+            "Пожалуйста, выберите группу, используя кнопки под предыдущим сообщением.\n"
+            "Отправьте /start для отмены регистрации."
         )
         return
     

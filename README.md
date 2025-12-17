@@ -35,7 +35,7 @@ The Device Booking Bot is a Telegram bot designed to streamline the management o
 1. **Manage Devices**:
    - Add new devices.
    - Edit or delete existing devices.
-   - Import devices from a CSV file.
+   - Import devices from a CSV/XLSX file.
    - View booking history of each device.
 
 2. **Manage Users**:
@@ -83,6 +83,26 @@ pip install easyocr
 
 The first time you use OCR, it will download language models (this may take a few minutes).
 
+### Docker
+
+**Bot контейнер**
+1. Подготовьте директорию `data` рядом с `docker-compose.yml`:
+   - скопируйте `config.json_template` в `data/config.json` и пропишите токен/админов;
+   - при необходимости скопируйте `devices.json_template` и `users.json_template` в `data/`.
+2. Соберите и поднимите контейнер:
+   ```bash
+   docker-compose up -d --build
+   ```
+   Данные и логи будут храниться в `./data` (переменная `DATA_DIR=/app/data` прокинута в контейнер).
+
+**WebApp сканер (отдельный сервер)**
+1. Соберите и запустите статический сервер:
+   ```bash
+   docker-compose -f docker-compose.webapp.yml up -d --build
+   ```
+2. Опубликуйте его за HTTPS (например, через обратный прокси) и укажите полный URL в `config.json` (`webapp_url`).
+3. Файл доступен по пути `/webapp_scanner.html` (также задан как `index.html`).
+
 ## **How to Use**
 
 ### **User Workflow**
@@ -110,7 +130,7 @@ The first time you use OCR, it will download language models (this may take a fe
 
 2. **Managing Devices**:
    - Navigate to "Manage Devices" in the admin panel.
-   - Add new devices or import from a CSV file (format: `SN, Name, Type`).
+   - Add new devices or import from a CSV/XLSX file (format: `SN, Name, Type`).
    - Edit or delete existing devices.
    - View booking history for each device.
 

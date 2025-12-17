@@ -1,0 +1,11 @@
+FROM nginx:alpine
+
+WORKDIR /usr/share/nginx/html
+
+# Копируем сканер и ассеты
+COPY webapp_scanner.html ./webapp_scanner.html
+COPY webapp_scanner.html ./index.html
+COPY style.css ./style.css
+COPY app.js ./app.js
+
+EXPOSE 80
